@@ -1,0 +1,45 @@
+# dsh-feishu-bot 加载示例 —— 追加到 profile 的 cordis.patch.yml
+#
+# 飞书开放平台侧（开发者后台，自建应用）：
+#   1. 凭证与基础信息 → 复制 App ID / App Secret
+#   2. 添加应用能力 → 机器人
+#   3. 权限管理 → 开通 im:message:send_as_bot、im:message（含 p2p_msg/group_msg/group_at_msg）
+#   4. 事件与回调 → 添加事件 im.message.receive_v1（长连接模式，无需配置请求地址）
+#   5. 版本管理与发布 → 创建版本并发布
+#
+# 密钥建议放环境变量，配置里用 env: 引用：
+#   export FEISHU_APP_ID=cli_xxxx
+#   export FEISHU_APP_SECRET=xxxxxxxx
+
+# ── 方式一：llm 自动回复（默认，自包含） ──────────────────────────────
+- id: feishu-bot
+  name: dsh-feishu-bot
+  config:
+    appId: 'env:FEISHU_APP_ID'
+    appSecret: 'env:FEISHU_APP_SECRET'
+    mode: llm
+    provider: deepseek-official
+    model: deepseek-v4-flash
+    systemPrompt: 你是部署在飞书上的智能助手，用简洁友好的中文回答问题。
+    requireMention: true      # 群聊中必须 @机器人 才回复
+    dmMode: open              # 私聊开放
+    maxHistory: 20
+    tools: true               # 注册 feishu_* 模型工具
+
+# ── 方式二：agent 模式（把消息转交给 DSH agent 会话处理） ─────────────
+# - id: feishu-bot
+#   name: dsh-feishu-bot
+#   config:
+#     appId: 'env:FEISHU_APP_ID'
+#     appSecret: 'env:FEISHU_APP_SECRET'
+#     mode: agent
+#     agentId: main           # ctx.agents 中活跃的会话 id
+#     requireMention: true
+
+# ── 方式三：echo 模式（先验证绑定是否打通） ────────────────────────────
+# - id: feishu-bot
+#   name: dsh-feishu-bot
+#   config:
+#     appId: 'env:FEISHU_APP_ID'
+#     appSecret: 'env:FEISHU_APP_SECRET'
+#     mode: echo
