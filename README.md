@@ -297,6 +297,16 @@ SDK 按前缀自动推断接收方类型。
 
 ## 五、常见问题
 
+- **安装报 `ERR_PNPM_IGNORED_BUILDS`（protobufjs）**：pnpm 10/11 默认拦截依赖构建脚本，
+  `@larksuiteoapi/node-sdk` 的传递依赖 protobufjs 需要放行。在 profile 的
+  `pnpm-workspace.yaml` 加入：
+
+  ```yaml
+  allowBuilds:
+    protobufjs: true
+  ```
+
+  然后重新执行安装命令即可。
 - **`feishu: 连接长连接失败`（code 10003 invalid param）**：appId/appSecret 无效，
   或应用未发布版本。检查凭证与「版本管理与发布」状态。
 - **群聊里机器人不回复**：确认已开启机器人能力、已订阅 `im.message.receive_v1`、
