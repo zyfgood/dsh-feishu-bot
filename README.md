@@ -18,6 +18,53 @@ DeepSeek Harness（DSH）插件：**绑定飞书（Feishu / Lark）机器人并�
 - **策略**：群聊 @机器人 才回复、私聊开关、会话白名单、@所有人 响应开关，均由
   SDK 的入站策略管道执行。
 
+---
+
+## English Summary
+
+**dsh-feishu-bot** bridges a [Feishu / Lark](https://open.feishu.cn/) bot into
+DeepSeek Harness (DSH). Talk to your DSH agent from Feishu on your phone — no
+public callback URL needed (official WebSocket long connection, auto-reconnect).
+
+**Features**
+
+- **Inbound (user → agent)**: three reply modes — `echo` (verify binding),
+  `llm` (direct model reply with per-chat short-term memory), `agent` (hand the
+  message to a DSH agent; auto-creates a dedicated per-chat session with the
+  standard preset and full DSH tooling, replies **streamed live** to Feishu).
+- **Ask while a task is running**: messages sent mid-task are injected via
+  `steer` at the next step boundary — the agent answers first (streamed), then
+  continues the task.
+- **Session commands**: `/new` (fresh context), `/sessions` (list sessions),
+  `/attach` (take over an existing GUI session — both sides share context),
+  `/detach`.
+- **Outbound (agent → Feishu)**: six model-callable tools
+  (`feishu_send_message`, `feishu_reply_message`, `feishu_list_chats`,
+  `feishu_get_messages`, `feishu_get_chat_info`, `feishu_connection_status`).
+- **Policies**: group chats reply only when mentioned, DM on/off, chat
+  allowlists, respond-to-@all switch — all via the SDK inbound policy pipeline.
+- **Config**: `appId`/`appSecret` via `env:VAR` (never plaintext), `domain`
+  `feishu`/`lark`, `dmMode` open/allowlist/pair/disabled, group allowlist,
+  `requireMention`, agent preset & workspace, command toggles.
+
+**Install**
+
+```bash
+# Git channel (repo root is the plugin)
+dsh plugin --profile web add "github:zyfgood/dsh-feishu-bot#main&path:/"
+# (npm channel: TBD)
+```
+
+Then create a self-built Feishu app (see the Chinese sections below for the
+open-platform steps: bot capability, `im:message` scopes, subscribe
+`im.message.receive_v1`, long-connection mode, publish a version) and restart
+`dsh web`. Log line `feishu: 长连接已就绪（机器人：<bot name>）` means the
+binding succeeded.
+
+**License**: MIT.
+
+---
+
 ## 目录
 
 - [快速开始](#快速开始)

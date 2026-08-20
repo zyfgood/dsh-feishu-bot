@@ -48,5 +48,13 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "typescript": "^5.6.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zyfgood/dsh-feishu-bot.git"
+  },
+  "homepage": "https://github.com/zyfgood/dsh-feishu-bot#readme",
+  "bugs": {
+    "url": "https://github.com/zyfgood/dsh-feishu-bot/issues"
   }
 }
