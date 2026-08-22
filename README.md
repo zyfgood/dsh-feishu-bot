@@ -119,15 +119,21 @@ binding succeeded.
 
 插件以 Cordis 插件形式加载，通过 profile 的 `cordis.patch.yml` 插入配置行。
 
-> **从 npm / Git 仓库安装（推荐，开箱即用）**
+> **从 Git 仓库安装（推荐，一条命令安装并挂载）**
 >
 > ```bash
-> dsh plugin --profile web add dsh-feishu-bot            # npm 渠道（发布后可用）
-> # 或 Git 渠道：
-> dsh plugin --profile web add "github:<你的用户名>/dsh-feishu-bot#main&path:/"
+> # 安装前设置密钥环境变量（也可装后再设，重启前配置好即可）
+> export FEISHU_APP_ID=cli_xxx
+> export FEISHU_APP_SECRET=xxx
+>
+> dsh plugin --profile web add "github:zyfgood/dsh-feishu-bot#main&path:/"
+> # 或 npm 渠道（发布后可用）：dsh plugin --profile web add dsh-feishu-bot
 > ```
 >
-> 装完重启 `dsh web` 即生效；下方是手工安装方式（适用于任何托管位置）。
+> 包内自带 `cordis.patch.yml`（`dsh.bundle.patch`），CLI 安装时自动挂载，
+> 无需手工编辑配置文件；默认 `llm` 模式，改 `agent` 模式等见「三、配置项」，
+> 在 profile 自己的 `cordis.patch.yml` 里按 `id: feishu-bot` 覆盖即可。
+> 装完重启 `dsh web` 生效；下方是手工安装方式（适用于任何托管位置）。
 
 ### 2.1 把插件放进 profile 目录并安装依赖
 

@@ -1,0 +1,23 @@
+# dsh-feishu-bot bundle patch
+#
+# 通过官方 CLI 安装时——
+#
+#   dsh plugin --profile <name> add "github:zyfgood/dsh-feishu-bot#main&path:/"
+#
+# ——CLI 会把本包加入 profile 的 bundle 栈；profile 启动时合并此 patch
+#（单行 insert 插件行），无需手工编辑 cordis.yml，一条命令完成安装与挂载。
+#
+# 启动前请设置环境变量（密钥不落盘）：
+#   export FEISHU_APP_ID=cli_xxx
+#   export FEISHU_APP_SECRET=xxx
+#
+# 默认 llm 自动回复模式；改 agent 模式等更多配置见 README「三、配置项」，
+# 或在 profile 自己的 cordis.patch.yml 里按 id: feishu-bot 覆盖。
+- insert:
+    - id: feishu-bot
+      name: dsh-feishu-bot
+      config:
+        appId: 'env:FEISHU_APP_ID'
+        appSecret: 'env:FEISHU_APP_SECRET'
+        mode: llm
+        requireMention: true

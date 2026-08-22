@@ -13,7 +13,8 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "lib"
+    "lib",
+    "cordis.patch.yml"
   ],
   "license": "MIT",
   "engines": {
@@ -56,5 +57,10 @@
   "homepage": "https://github.com/zyfgood/dsh-feishu-bot#readme",
   "bugs": {
     "url": "https://github.com/zyfgood/dsh-feishu-bot/issues"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
   }
 }
