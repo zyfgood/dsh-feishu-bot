@@ -7,7 +7,10 @@
  * - 互动（入站）：用户给机器人发消息 → 按 mode 处理
  *   （echo 回显 / llm 用 ctx.llm 自动回复 / agent 转交给 DSH agent 回复）；
  * - 互动（出站）：注册 feishu_* 模型工具，让 DSH agent 主动发消息、
- *   回复、查会话、查消息、查连接状态。
+ *   回复、查会话、查消息、查连接状态、发交互卡片、发起确认问答；
+ * - 确认问答：agent 调用 ask_user_question 时问题以「按钮卡片 + 编号提示」
+ *   发到飞书（点按钮/回编号/回复选项文字/超时兜底），不再只在 Web 界面挂起；
+ * - 会话延续：chat→会话映射落盘，dsh web 重启后自动 resume 原 DSH 会话。
  *
  * 加载方式（profile 的 cordis.patch.yml）：
  * ```yaml
@@ -27,8 +30,10 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { FeishuService, type FeishuPolicyConfig } from './service.ts'
-import { attachInbound } from './inbound.ts'
+import { attachInbound, type InboundShared } from './inbound.ts'
 import { registerFeishuTools } from './tools.ts'
+import { PendingQuestionState } from './questions.ts'
+import { ChatSessionStore } from './persistence.ts'
 
 export const name = 'feishu-bot'
 
@@ -99,6 +104,17 @@ export interface Config {
   tools?: boolean
   /** 回复消息的排版格式：markdown（富文本渲染，默认）或 text（纯文本）。 */
   replyFormat?: 'markdown' | 'text'
+  /**
+   * 飞书侧确认问题等待回答的超时（ms，默认 10 分钟）。agent 调用
+   * ask_user_question 时问题会以交互卡片发到飞书；超时未答自动取消该次
+   * 询问，避免 agent 回合永久挂起、会话队列被堵死。
+   */
+  questionTimeoutMs?: number
+  /**
+   * 是否持久化 chat→会话映射（默认 true）：dsh web 重启后同一飞书会话
+   * 自动恢复原 DSH 会话（agents.resume），延续对话上下文。
+   */
+  persistSessions?: boolean
 }
 
 export const Config: z<Config> = z.object({
@@ -114,6 +130,8 @@ export const Config: z<Config> = z.object({
   mode: z.union(['echo', 'llm', 'agent'] as const).default('llm'),
   /** 回复消息的排版格式：markdown 富文本渲染（代码块/表格/列表）或纯文本。 */
   replyFormat: z.union(['markdown', 'text'] as const).default('markdown'),
+  questionTimeoutMs: z.number().min(1000).default(600_000),
+  persistSessions: z.boolean().default(true),
   systemPrompt: z.string().default(
     '你是部署在飞书上的智能助手。请用简洁、友好的中文回答用户的问题；'
     + '涉及代码时直接给出可运行的代码块。',
@@ -179,10 +197,20 @@ export function apply(ctx: Context, config: Config): void {
     })
 
   // 入站互动：飞书消息 → 机器人回复。
-  attachInbound(ctx, service, config)
+  // 共享状态：会话绑定 / 流式转发 / 飞书侧确认问答 / 持久化映射。
+  const questions = new PendingQuestionState(ctx, service, config.questionTimeoutMs ?? 600_000)
+  const store = config.persistSessions === false ? undefined : ChatSessionStore.load()
+  const shared: InboundShared = {
+    stateByChat: new Map(),
+    relays: new Map(),
+    chatByAgent: new Map(),
+    questions,
+    store,
+  }
+  attachInbound(ctx, service, config, shared)
 
   // 出站互动：模型可调用 feishu_* 工具。
   if (config.tools !== false) {
-    registerFeishuTools(ctx, service, config.pushChatId)
+    registerFeishuTools(ctx, service, config.pushChatId, questions)
   }
 }

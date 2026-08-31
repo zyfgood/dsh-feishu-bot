@@ -178,7 +178,7 @@ console.log('6) agent 模式自动创建/复用')
   const agents = makeAgentsRegistry()
   const attached = []
   const { listeners, send, handler } = await boot(
-    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false },
+    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false, persistSessions: false },
     {
       agents,
       workspaceRegistry: {
@@ -203,7 +203,7 @@ console.log('7) /new 重置')
 {
   const agents = makeAgentsRegistry()
   const { send, handler } = await boot(
-    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false },
+    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false, persistSessions: false },
     { agents },
   )
   await handler({ chatId: 'oc_4', messageId: 'om_5', content: 'hi', senderId: 'ou_1' })
@@ -223,7 +223,7 @@ console.log('8) /sessions + /attach 编号')
   gui.session.events.push({ seq: 1, type: 'session/title', data: { title: '帮我重构登录模块' } })
   const agents = makeAgentsRegistry([gui, makeAgent('feishu-oc_5-abc12345', '/mnt/d/DSHProjects')])
   const { send, handler } = await boot(
-    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false },
+    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false, persistSessions: false },
     { agents, sessionTitle: { get: (s) => s.events.findLast(e => e.type === 'session/title')?.data } },
   )
   await handler({ chatId: 'oc_5', messageId: 'om_7', content: '/sessions', senderId: 'ou_1' })
@@ -258,7 +258,7 @@ console.log('9) 标准 agent preset')
     return realCreate(opts)
   }
   const { handler } = await boot(
-    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false },
+    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false, persistSessions: false },
     {
       agents,
       agentPresets: {
@@ -280,7 +280,7 @@ console.log('10) 流式输出')
 {
   const agents = makeAgentsRegistry()
   const { listeners, send, handler } = await boot(
-    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false },
+    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false, persistSessions: false },
     { agents, agentPresets: { defaultId: 'standard' } },
   )
   // 让 followup 触发流式 chunk（模拟 agent 输出）
@@ -312,7 +312,7 @@ console.log('10b) 原生流式增量刷新')
 {
   const agents = makeAgentsRegistry()
   const { listeners, send, handler } = await boot(
-    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false },
+    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false, persistSessions: false },
     { agents, agentPresets: { defaultId: 'standard' } },
   )
   const realCreate = agents.create
@@ -345,7 +345,7 @@ console.log('11) 任务执行中回应')
 {
   const agents = makeAgentsRegistry()
   const { listeners, send, handler } = await boot(
-    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false },
+    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false, persistSessions: false },
     { agents, agentPresets: { defaultId: 'standard' } },
   )
   let live = null
@@ -386,7 +386,7 @@ console.log('12) /attach 发送最近历史')
   gui.session.events.push({ seq: 6, type: 'session/title', data: { title: '项目重构讨论' } })
   const agents = makeAgentsRegistry([gui])
   const { send, handler } = await boot(
-    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false, attachHistory: 3 },
+    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false, persistSessions: false, attachHistory: 3 },
     { agents, sessionTitle: { get: (s) => s.events.findLast(e => e.type === 'session/title')?.data } },
   )
   await handler({ chatId: 'oc_12', messageId: 'om_13', content: '/attach session-gui-888', senderId: 'ou_1' })
@@ -459,6 +459,191 @@ console.log('14) 复读熔断 detectTailRepetition')
   assert.equal(detectTailRepetition('好好好好好好好好好'), null, '短文本不应命中')
 
   ok('命中/不命中/阈值边界')
+}
+
+// ── 15. 飞书版 ask_user_question：setup 注册 + 按钮卡片 + 点击回答 ──
+console.log('15) 飞书版 ask_user_question（卡片确认闭环）')
+{
+  const agents = makeAgentsRegistry()
+  // 让 setup 拿到带 tools 的 agentCtx，捕获注册的 agent 级工具
+  const registeredTools = new Map()
+  const realCreate = agents.create
+  agents.create = async (opts) => {
+    if (opts.setup) {
+      const original = opts.setup
+      opts.setup = async (agentCtx) => {
+        const ctxWithTools = {
+          ...agentCtx,
+          get: (name) => name === 'tools' ? { register: (def) => { registeredTools.set(def.name, def); return () => {} } } : undefined,
+        }
+        await original(ctxWithTools)
+      }
+    }
+    return realCreate(opts)
+  }
+  const { send, handler, ctx } = await boot(
+    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false, persistSessions: false },
+    { agents, agentPresets: { defaultId: 'standard' } },
+  )
+  await handler({ chatId: 'oc_15', messageId: 'om_15', content: '你好', senderId: 'ou_1' })
+  await new Promise(r => setTimeout(r, 30))
+  const askTool = registeredTools.get('ask_user_question')
+  assert.ok(askTool, 'agent 级 ask_user_question 应已注册')
+  // 触发问题：execute → 发送按钮卡片 + 提示文本，等待点击
+  const promise = askTool.execute(
+    { questions: [{ id: 'q1', question: '确认执行哪个方案？', options: ['方案A', '方案B'] }] },
+    { agent: { id: agents.roots()[0].id }, signal: undefined },
+  )
+  await new Promise(r => setTimeout(r, 50))
+  const cardSend = send.find(s => s.input?.card?.body?.elements?.some(e => e.tag === 'action'))
+  assert.ok(cardSend, '应发送带按钮的交互卡片')
+  const actionEl = cardSend.input.card.body.elements.find(e => e.tag === 'action')
+  assert.equal(actionEl.actions.length, 2, '两个选项对应两个按钮')
+  const qid = actionEl.actions[0].value.feishu_q
+  assert.ok(qid, '按钮 value 应携带 qid')
+  assert.ok(send.some(s => typeof s.input?.text === 'string' && s.input.text.includes('编号')), '应有编号提示文本')
+  // 模拟用户点击第二个按钮
+  const cardAction = ctx.feishu.channel['handlers'].cardAction
+  assert.ok(cardAction, '应订阅 cardAction 事件')
+  await cardAction({ chatId: 'oc_15', messageId: 'om_c1', operator: { openId: 'ou_1' }, action: { tag: 'button', value: { feishu_q: qid, q: 'q1', o: '1' } } })
+  const result = await promise
+  assert.equal(result.answers[0].id, 'q1')
+  assert.deepEqual(result.answers[0].selected, ['方案B'])
+  ok('按钮点击 → 回答回流 → ask 完成')
+}
+
+// ── 16. 文字回复编号作为回答（不进入 agent 队列） ──────────────
+console.log('16) 文字回复回答确认问题')
+{
+  const agents = makeAgentsRegistry()
+  const registeredTools = new Map()
+  const realCreate = agents.create
+  agents.create = async (opts) => {
+    if (opts.setup) {
+      const original = opts.setup
+      opts.setup = async (agentCtx) => {
+        const ctxWithTools = {
+          ...agentCtx,
+          get: (name) => name === 'tools' ? { register: (def) => { registeredTools.set(def.name, def); return () => {} } } : undefined,
+        }
+        await original(ctxWithTools)
+      }
+    }
+    return realCreate(opts)
+  }
+  const { send, handler } = await boot(
+    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false, persistSessions: false },
+    { agents, agentPresets: { defaultId: 'standard' } },
+  )
+  await handler({ chatId: 'oc_16', messageId: 'om_16', content: '你好', senderId: 'ou_1' })
+  await new Promise(r => setTimeout(r, 30))
+  const askTool = registeredTools.get('ask_user_question')
+  const agentId = agents.roots()[0].id
+  const nBefore = agents.roots()[0].session.events.length
+  const promise = askTool.execute(
+    { questions: [{ id: 'q1', question: '选哪个？', options: ['甲', '乙', '丙'] }] },
+    { agent: { id: agentId }, signal: undefined },
+  )
+  await new Promise(r => setTimeout(r, 50))
+  // 用户回复编号 3
+  await handler({ chatId: 'oc_16', messageId: 'om_17', content: '3', senderId: 'ou_1' })
+  const result = await promise
+  assert.deepEqual(result.answers[0].selected, ['丙'], '编号 3 应映射到「丙」')
+  await new Promise(r => setTimeout(r, 30))
+  const nAfter = agents.roots()[0].session.events.length
+  assert.equal(nAfter, nBefore, '回答文本不应作为新消息进入 agent')
+  ok('文字回复编号 → 直接回答，不污染 agent 会话')
+}
+
+// ── 17. 确认问题超时兜底：回合必然结束，队列不被堵死 ────────────
+console.log('17) 确认问题超时兜底')
+{
+  const agents = makeAgentsRegistry()
+  const registeredTools = new Map()
+  const realCreate = agents.create
+  agents.create = async (opts) => {
+    if (opts.setup) {
+      const original = opts.setup
+      opts.setup = async (agentCtx) => {
+        const ctxWithTools = {
+          ...agentCtx,
+          get: (name) => name === 'tools' ? { register: (def) => { registeredTools.set(def.name, def); return () => {} } } : undefined,
+        }
+        await original(ctxWithTools)
+      }
+    }
+    return realCreate(opts)
+  }
+  const { handler } = await boot(
+    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false, persistSessions: false, questionTimeoutMs: 1200 },
+    { agents, agentPresets: { defaultId: 'standard' } },
+  )
+  await handler({ chatId: 'oc_17', messageId: 'om_18', content: '你好', senderId: 'ou_1' })
+  await new Promise(r => setTimeout(r, 30))
+  const askTool = registeredTools.get('ask_user_question')
+  const promise = askTool.execute(
+    { questions: [{ id: 'q1', question: '等谁？', options: ['A', 'B'] }] },
+    { agent: { id: agents.roots()[0].id }, signal: undefined },
+  )
+  await assert.rejects(promise, (err) => err.code === 'ASK_TIMEOUT')
+  ok('超时后 ask 以 ASK_TIMEOUT 结束（agent 回合可继续/收尾）')
+}
+
+// ── 18. 持久化映射 + resume 恢复会话（重启后上下文延续） ────────
+console.log('18) 持久化映射 + resume 恢复')
+{
+  const os = await import('node:os')
+  const path = await import('node:path')
+  const fs = await import('node:fs')
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'feishu-test-'))
+  const oldHome = process.env.DSH_HOME
+  process.env.DSH_HOME = tmp
+  try {
+    const storeDir = path.join(tmp, 'feishu-bot')
+    fs.mkdirSync(storeDir, { recursive: true })
+    fs.writeFileSync(path.join(storeDir, 'chat-sessions.json'), JSON.stringify({ oc_resume: 'feishu-oc_resume-deadbeef' }))
+    const resumeCalls = []
+    // 带 resume 的 mock 注册表
+    const live = new Map()
+    const agents = {
+      get: (id) => live.get(id),
+      list: () => [...live.values()],
+      roots: () => [...live.values()],
+      create: async (opts) => {
+        const a = makeAgent(opts.sessionId, opts.meta?.cwd, opts.agentOptions?.model)
+        live.set(a.id, a)
+        if (opts.setup) await opts.setup({ agent: a })
+        return { agent: a, dispose: () => { live.delete(a.id); return Promise.resolve() } }
+      },
+      resume: async (opts) => {
+        resumeCalls.push(opts.resumeSessionId)
+        const a = makeAgent(opts.resumeSessionId, '/mnt/d/DSHProjects', opts.agentOptions?.model)
+        live.set(a.id, a)
+        if (opts.setup) await opts.setup({ agent: a })
+        return { agent: a, dispose: () => { live.delete(a.id); return Promise.resolve() } }
+      },
+    }
+    const { handler } = await boot(
+      { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false },
+      { agents, agentPresets: { defaultId: 'standard' } },
+    )
+    await handler({ chatId: 'oc_resume', messageId: 'om_19', content: '继续', senderId: 'ou_1' })
+    await new Promise(r => setTimeout(r, 30))
+    assert.equal(resumeCalls.length, 1, '应尝试 resume 映射中的会话')
+    assert.equal(resumeCalls[0], 'feishu-oc_resume-deadbeef')
+    assert.equal(agents.roots().length, 1, '不应新建额外会话')
+    assert.equal(agents.roots()[0].id, 'feishu-oc_resume-deadbeef', '恢复的是原会话')
+    // /new 后映射应清除
+    await handler({ chatId: 'oc_resume', messageId: 'om_20', content: '/new', senderId: 'ou_1' })
+    await new Promise(r => setTimeout(r, 30))
+    const stored = JSON.parse(fs.readFileSync(path.join(storeDir, 'chat-sessions.json'), 'utf8'))
+    assert.equal(stored.oc_resume, undefined, '/new 应清除持久化映射')
+    ok('重启后 resume 恢复原会话；/new 清除映射')
+  } finally {
+    if (oldHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = oldHome
+    fs.rmSync(tmp, { recursive: true, force: true })
+  }
 }
 
 console.log(`\n全部通过（${passed} 项断言组）✅`)

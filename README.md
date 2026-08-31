@@ -207,9 +207,11 @@ dsh --profile web
 | `agentId` | string | — | `agent` 模式：目标 DSH agent 会话 id（不配置则自动创建） |
 | `agentPreset` | string | 跟随默认 | 自动创建会话使用的 agent preset（如 `standard` / `liangshen`）；不配置跟随 GUI 默认预设 |
 | `workspace` | string | `process.cwd()` | `agent` 模式自动创建会话时的工作目录 |
-| `commands` | boolean | `true` | 是否启用飞书会话管理命令（`/new` `/sessions` `/attach` `/detach`） |
+| `commands` | boolean | `true` | 是否启用飞书会话管理命令（`/new` `/sessions` `/attach` `/detach` `/cancel`） |
 | `resetCommands` | string[] | `['/new', '/reset']` | 重置上下文命令列表 |
 | `attachHistory` | number | `5` | /attach 接手后发送最近几条对话历史（0 = 不发） |
+| `questionTimeoutMs` | number | `600000` | 飞书侧确认问题等待回答的超时（ms，默认 10 分钟；超时自动取消该次询问，防止 agent 回合/会话队列被永久挂起） |
+| `persistSessions` | boolean | `true` | 是否持久化 chat→会话映射：dsh web 重启后自动 `resume` 原 DSH 会话，延续对话上下文（映射存于 `$DSH_HOME/feishu-bot/chat-sessions.json`） |
 | `tools` | boolean | `true` | 是否注册 `feishu_*` 模型工具 |
 | `pushChatId` | string | — | 飞书目标群 chat_id（`oc_` 开头）；配置后启用 `feishu_push` 工具（任务结果/定时推送直达该群） |
 
@@ -253,11 +255,26 @@ dsh --profile web
   下一个节点**先回应你的问题**，再继续任务（不会打断/丢弃任务）；
 - 回应同样**流式实时转发**到飞书，遇到 agent 下一次工具调用即收尾定型；
 - 若 agent 直接完成任务而没有再回应，则以 idle 收尾。
+- 长任务期间你的消息会先收到「📥 已收到」即时确认，不再石沉大海。
 
 > 说明：如果 agent 卡在单个长工具调用内（如长时间 bash 命令），问题要等该
 > 工具返回后才能被读到——这是单 agent 模型的固有限制。
 
-### 4.3 飞书会话管理命令（agent 模式，`commands` 默认开启）
+### 4.3 交互确认卡片（agent 调用 ask_user_question 时）
+
+agent 在飞书会话里调用 `ask_user_question`（需要你确认/选择）时，**问题不再
+只出现在 Web 界面**：插件会向该飞书会话发送一张**带按钮的交互卡片**（每个选项
+一个按钮）+ 编号提示，你可以：
+
+- **点按钮**直接选择；
+- 或**回复编号**（如 `1`、`2,3`；多选问题用逗号分隔）或**回复选项原文**；
+- 或回复 `/cancel` 取消该次询问（agent 继续执行、不等待）。
+
+超时（`questionTimeoutMs`，默认 10 分钟）未回答会自动取消该次询问，agent 回合
+必然结束——不会出现「问题只出现在 Web、飞书侧永久挂起、机器人从此不再回复」。
+（`/attach` 接手的 GUI 会话不受影响，确认仍走 Web 界面。）
+
+### 4.4 飞书会话管理命令（agent 模式，`commands` 默认开启）
 
 在飞书里直接给机器人发命令（群聊需 @机器人），无需改配置、无需重启：
 
@@ -267,6 +284,7 @@ dsh --profile web
 | `/sessions` | 列出当前活跃的 DSH agent 会话（编号 + 标题 + 模型 + 工作目录） |
 | `/attach <编号或会话id>` | **接手 GUI 中某个既有会话**：此后该飞书会话直接驱动它（两边共享上下文，GUI 可见） |
 | `/detach` | 解除接手，回到自动创建模式 |
+| `/cancel` | 取消当前待确认问题（agent 继续执行） |
 
 示例：想在飞书里继续 GUI 中某个会话 → 先发 `/sessions`，看到类似：
 
@@ -290,12 +308,19 @@ dsh --profile web
 > 自动创建的飞书会话会**自动归入 `workspace` 配置的工作区**（如 DSHProjects），
 > 不会出现在「未分组」里；会话标题由 DSH 的 session-title 服务生成，未生成前
 > 显示「飞书会话 · <目录名>」。
+>
+> **重启延续**（`persistSessions`，默认开启）：插件把 chat→会话 映射持久化到
+> `$DSH_HOME/feishu-bot/chat-sessions.json`。dsh web 重启/插件重载后，你在
+> 飞书发的下一条消息会自动 `resume` 原 DSH 会话（同一 id、同一上下文），
+> 不会再被当成新用户另起炉灶。`/new` 会清除该映射。
 
-### 4.4 出站：DSH agent → 飞书（模型工具）
+### 4.5 出站：DSH agent → 飞书（模型工具）
 
 | 工具 | 用途 |
 |---|---|
 | `feishu_send_message` | 向会话/用户发送文本或 markdown，可引用某条消息回复 |
+| `feishu_send_card` | 向会话/用户发送**任意交互卡片**（卡片 JSON 2.0，可带按钮等元素） |
+| `feishu_ask_choice` | 发送**带按钮的确认卡片**并等待用户点击（或回复编号/选项文字）；超时可配，返回 `timeout=true` |
 | `feishu_reply_message` | 按 message_id 回复某条消息（无需知道会话 id） |
 | `feishu_list_chats` | 列出机器人可访问的会话 |
 | `feishu_get_messages` | 拉取某会话最近消息（了解上下文） |
@@ -304,7 +329,9 @@ dsh --profile web
 | `feishu_push` | 把结果一键推送到配置的目标群（需 `pushChatId`；适合任务汇报、定时任务推送） |
 
 `feishu_send_message` 的 `target` 支持 chat_id（`oc_` 开头）或用户 open_id（`ou_` 开头），
-SDK 按前缀自动推断接收方类型。
+SDK 按前缀自动推断接收方类型。按钮卡片（`feishu_ask_choice` / 确认卡片）需要
+开放平台已订阅**卡片交互回调**（长连接模式下在「事件与回调 → 事件订阅」勾选
+`card.action.trigger`），点击事件才会推送到插件。
 
 ## 五、常见问题
 
@@ -327,6 +354,14 @@ SDK 按前缀自动推断接收方类型。
 - **私聊不可用**：`dmMode` 默认 `open`；若设为 `disabled` 则机器人不响应私聊。
 - **agent 模式无回复**：确认 `agentId` 对应会话在 `ctx.agents` 中处于活跃状态；
   若 agent 只调用工具而未输出文本，插件不会发送空消息。
+- **对话一轮就断 / 机器人不再回复**：旧版本在 agent 调用 `ask_user_question`（需你
+  确认）时，问题只出现在 Web 界面，飞书侧答不了，agent 回合永久挂起导致该会话
+  队列被堵死。升级到 v0.6.0 后问题会以交互卡片发到飞书（点按钮/回编号/`/cancel`），
+  并有超时兜底；若仍怀疑卡住，可在飞书发 `/new` 重置会话。
+- **重启后飞书对话上下文丢失**：v0.6.0 起默认持久化 chat→会话映射并自动恢复；
+  确认 `persistSessions` 未被关闭、`$DSH_HOME/feishu-bot/chat-sessions.json` 可写。
+- **卡片按钮点击无响应**：开放平台需已订阅**卡片交互回调**（长连接模式下在
+  「事件与回调 → 事件订阅」勾选 `card.action.trigger`）并重新发布版本。
 
 ## 开发与构建
 
@@ -342,7 +377,9 @@ npm test                         # 冒烟测试（mock 上下文跑通核心链�
 
 - `src/index.ts` — 插件入口（Config 校验、服务注册、生命周期）
 - `src/service.ts` — `FeishuService`（`ctx.feishu`：长连接 + 消息 API）
-- `src/inbound.ts` — 入站消息路由（echo / llm / agent）+ 会话管理命令
+- `src/inbound.ts` — 入站消息路由（echo / llm / agent）+ 会话管理命令 + 会话恢复
+- `src/questions.ts` — 飞书侧确认问答（交互卡片 + 按钮点击 + 文本回答 + 超时兜底）
+- `src/persistence.ts` — chat→会话映射落盘（重启后 resume 恢复上下文）
 - `src/tools.ts` — 模型可调用的 `feishu_*` 工具
 - `tests/smoke.mjs` — 冒烟测试（`npm test`）
 - `cordis.patch.example.yml` — profile patch 配置示例

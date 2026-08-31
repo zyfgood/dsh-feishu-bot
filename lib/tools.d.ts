@@ -7,5 +7,6 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type { FeishuService } from './service.ts';
-export declare function registerFeishuTools(ctx: Context, service: FeishuService, pushChatId?: string): void;
+import type { PendingQuestionState } from './questions.ts';
+export declare function registerFeishuTools(ctx: Context, service: FeishuService, pushChatId?: string, questions?: PendingQuestionState): void;
 //# sourceMappingURL=tools.d.ts.map

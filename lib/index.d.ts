@@ -7,7 +7,10 @@
  * - 互动（入站）：用户给机器人发消息 → 按 mode 处理
  *   （echo 回显 / llm 用 ctx.llm 自动回复 / agent 转交给 DSH agent 回复）；
  * - 互动（出站）：注册 feishu_* 模型工具，让 DSH agent 主动发消息、
- *   回复、查会话、查消息、查连接状态。
+ *   回复、查会话、查消息、查连接状态、发交互卡片、发起确认问答；
+ * - 确认问答：agent 调用 ask_user_question 时问题以「按钮卡片 + 编号提示」
+ *   发到飞书（点按钮/回编号/回复选项文字/超时兜底），不再只在 Web 界面挂起；
+ * - 会话延续：chat→会话映射落盘，dsh web 重启后自动 resume 原 DSH 会话。
  *
  * 加载方式（profile 的 cordis.patch.yml）：
  * ```yaml
@@ -93,6 +96,17 @@ export interface Config {
     tools?: boolean;
     /** 回复消息的排版格式：markdown（富文本渲染，默认）或 text（纯文本）。 */
     replyFormat?: 'markdown' | 'text';
+    /**
+     * 飞书侧确认问题等待回答的超时（ms，默认 10 分钟）。agent 调用
+     * ask_user_question 时问题会以交互卡片发到飞书；超时未答自动取消该次
+     * 询问，避免 agent 回合永久挂起、会话队列被堵死。
+     */
+    questionTimeoutMs?: number;
+    /**
+     * 是否持久化 chat→会话映射（默认 true）：dsh web 重启后同一飞书会话
+     * 自动恢复原 DSH 会话（agents.resume），延续对话上下文。
+     */
+    persistSessions?: boolean;
 }
 export declare const Config: z<Config>;
 /** 把 `env:VAR` 形式的配置值解析为环境变量值。 */
