@@ -1,5 +1,5 @@
 /**
- * 模型可调用的工具：feishu_*（飞书互动）与 email_send（邮件通知）。
+ * 模型可调用的工具：feishu_*（飞书互动）。
  *
  * 依赖 `ctx.tools`；未加载该服务时跳过注册并告警。
  *
@@ -9,53 +9,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { FeishuService } from './service.ts'
-import { sendEmail, type EmailConfig } from './mail.ts'
-
-/** 注册邮件发送工具（仅当 email 配置存在时）。 */
-export function registerEmailTool(ctx: Context, email: EmailConfig): void {
-  const tools = ctx.get('tools')
-  if (!tools) {
-    ctx.logger.warn('feishu: 当前环境未加载 ctx.tools，跳过 email_send 工具注册')
-    return
-  }
-  ctx.effect(() => tools.register(defineTool({
-    name: 'email_send',
-    description: '发送一封邮件通知（SMTP）。收件人默认为配置的默认收件人（未配置则发给自己）。适合任务结果汇报、定时任务通知、需要邮件留痕的场景。',
-    parameters: {
-      subject: { type: 'string', required: true, description: '邮件主题' },
-      content: { type: 'string', required: true, description: '邮件正文' },
-      to: { type: 'string', description: '收件人邮箱（多个用逗号分隔；不填用默认收件人）' },
-      html: { type: 'boolean', description: 'content 是否按 HTML 发送（默认 false 纯文本）' },
-    },
-    output: {
-      schema: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          sent: { type: 'boolean', required: true },
-          to: { type: 'string', required: true },
-          message_id: { type: 'string' },
-          detail: { type: 'string' },
-        },
-      },
-      render: (args, value) => [{
-        type: 'text',
-        text: value.sent
-          ? `邮件已发送至 ${value.to}（message_id: ${value.message_id ?? 'n/a'}）`
-          : `邮件发送失败：${value.detail ?? '未知错误'}`,
-      }],
-    },
-    execute: async (args) => {
-      const to = args.to?.trim() || email.to?.trim() || email.user
-      try {
-        const result = await sendEmail(email, to, args.subject, args.content, args.html ?? false)
-        return { sent: true, to, message_id: result.messageId }
-      } catch (error) {
-        return { sent: false, to, detail: error instanceof Error ? error.message : String(error) }
-      }
-    },
-  })))
-}
 
 export function registerFeishuTools(ctx: Context, service: FeishuService, pushChatId?: string): void {
   const tools = ctx.get('tools')

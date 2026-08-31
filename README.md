@@ -212,7 +212,6 @@ dsh --profile web
 | `attachHistory` | number | `5` | /attach 接手后发送最近几条对话历史（0 = 不发） |
 | `tools` | boolean | `true` | 是否注册 `feishu_*` 模型工具 |
 | `pushChatId` | string | — | 飞书目标群 chat_id（`oc_` 开头）；配置后启用 `feishu_push` 工具（任务结果/定时推送直达该群） |
-| `email` | object | — | SMTP 邮件配置（`host`/`port`/`secure`/`user`/`pass`/`to`）；配置后启用 `email_send` 工具，凭证支持 `env:VAR` |
 
 ## 四、互动方式
 
@@ -301,7 +300,6 @@ dsh --profile web
 | `feishu_get_chat_info` | 查询会话详情 |
 | `feishu_connection_status` | 查询长连接状态与机器人身份（诊断用） |
 | `feishu_push` | 把结果一键推送到配置的目标群（需 `pushChatId`；适合任务汇报、定时任务推送） |
-| `email_send` | 发送 SMTP 邮件通知（需 `email` 配置；收件人缺省发给自己） |
 
 `feishu_send_message` 的 `target` 支持 chat_id（`oc_` 开头）或用户 open_id（`ou_` 开头），
 SDK 按前缀自动推断接收方类型。
