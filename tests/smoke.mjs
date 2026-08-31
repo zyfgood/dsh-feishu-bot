@@ -89,11 +89,23 @@ async function boot(configRaw, fakeServices = {}) {
   const send = []
   channel.send = async (to, input, opts) => { send.push({ to, input, opts }); return { messageId: `om_${send.length}` } }
   channel.editMessage = async (messageId, text) => { send.push({ to: 'EDIT', editMessageId: messageId, input: { text }, opts: undefined }) }
+  channel.updateCard = async (messageId, card) => { send.push({ to: 'EDIT-CARD', editMessageId: messageId, input: { card }, opts: undefined }) }
   const handler = channel['handlers'].message
   return { ctx, listeners, send, handler }
 }
 
-const reply = (send) => send[send.length - 1]?.input?.text ?? ''
+/** 提取一条发送记录的文本：支持纯文本、markdown（post）与 markdown 卡片。 */
+const textOf = (input) => {
+  if (!input) return ''
+  if (typeof input.text === 'string') return input.text
+  if (typeof input.markdown === 'string') return input.markdown
+  const card = input.card
+  if (card && Array.isArray(card.body?.elements)) {
+    return card.body.elements.filter(e => e.tag === 'markdown').map(e => e.content).join('\n')
+  }
+  return ''
+}
+const reply = (send) => textOf(send[send.length - 1]?.input)
 
 // ── 1. 模块导出 ──────────────────────────────────────────────
 console.log('1) 模块导出')
@@ -154,7 +166,7 @@ console.log('6) agent 模式自动创建/复用')
   const agents = makeAgentsRegistry()
   const attached = []
   const { listeners, send, handler } = await boot(
-    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/workspace', tools: false },
+    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false },
     {
       agents,
       workspaceRegistry: {
@@ -179,7 +191,7 @@ console.log('7) /new 重置')
 {
   const agents = makeAgentsRegistry()
   const { send, handler } = await boot(
-    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/workspace', tools: false },
+    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false },
     { agents },
   )
   await handler({ chatId: 'oc_4', messageId: 'om_5', content: 'hi', senderId: 'ou_1' })
@@ -195,11 +207,11 @@ console.log('7) /new 重置')
 // ── 8. /sessions 可读列表 + 编号 /attach ─────────────────────
 console.log('8) /sessions + /attach 编号')
 {
-  const gui = makeAgent('session-gui-777', '/workspace/projA', 'deepseek-v4-pro')
+  const gui = makeAgent('session-gui-777', '/mnt/d/DSHProjects/projA', 'deepseek-v4-pro')
   gui.session.events.push({ seq: 1, type: 'session/title', data: { title: '帮我重构登录模块' } })
-  const agents = makeAgentsRegistry([gui, makeAgent('feishu-oc_5-abc12345', '/workspace')])
+  const agents = makeAgentsRegistry([gui, makeAgent('feishu-oc_5-abc12345', '/mnt/d/DSHProjects')])
   const { send, handler } = await boot(
-    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/workspace', tools: false },
+    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false },
     { agents, sessionTitle: { get: (s) => s.events.findLast(e => e.type === 'session/title')?.data } },
   )
   await handler({ chatId: 'oc_5', messageId: 'om_7', content: '/sessions', senderId: 'ou_1' })
@@ -234,7 +246,7 @@ console.log('9) 标准 agent preset')
     return realCreate(opts)
   }
   const { handler } = await boot(
-    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/workspace', tools: false },
+    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false },
     {
       agents,
       agentPresets: {
@@ -256,7 +268,7 @@ console.log('10) 流式输出')
 {
   const agents = makeAgentsRegistry()
   const { listeners, send, handler } = await boot(
-    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/workspace', tools: false },
+    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false },
     { agents, agentPresets: { defaultId: 'standard' } },
   )
   // 让 followup 触发流式 chunk（模拟 agent 输出）
@@ -276,7 +288,7 @@ console.log('10) 流式输出')
   }
   await handler({ chatId: 'oc_10', messageId: 'om_10', content: '测试流式', senderId: 'ou_1' })
   await new Promise(r => setTimeout(r, 700)) // 等待节流刷新
-  const sentTexts = send.map(s => s.input?.text ?? '').filter(Boolean)
+  const sentTexts = send.map(s => textOf(s.input)).filter(Boolean)
   assert.ok(sentTexts.length >= 1, '应有流式消息发出')
   assert.equal(sentTexts[sentTexts.length - 1], '你好，我是流式输出！', '最终文本完整')
   ok('流式输出：首段发送 + 后续编辑更新')
@@ -287,7 +299,7 @@ console.log('11) 任务执行中回应')
 {
   const agents = makeAgentsRegistry()
   const { listeners, send, handler } = await boot(
-    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/workspace', tools: false },
+    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false },
     { agents, agentPresets: { defaultId: 'standard' } },
   )
   let live = null
@@ -307,7 +319,7 @@ console.log('11) 任务执行中回应')
   await new Promise(r => setTimeout(r, 700))
   listeners['session/event']?.forEach(fn => fn({ id: live.id }, { type: 'assistant/chunk', data: { chunk: { type: 'tool-call-delta', index: 1, id: 'call_1', name: 'bash', argumentsDelta: '' } } }))
   await new Promise(r => setTimeout(r, 50))
-  const sentTexts = send.map(s => s.input?.text ?? '').filter(Boolean)
+  const sentTexts = send.map(s => textOf(s.input)).filter(Boolean)
   assert.ok(sentTexts.some(t => t.includes('进度 50%')), '任务中回应应流式转发')
   ok('任务执行中：steer 注入 + 流式回应 + 工具调用时收尾')
 }
@@ -316,7 +328,7 @@ console.log('11) 任务执行中回应')
 // ── 12. /attach 后发送最近历史 ───────────────────────────────
 console.log('12) /attach 发送最近历史')
 {
-  const gui = makeAgent('session-gui-888', '/workspace/projA', 'deepseek-v4-pro')
+  const gui = makeAgent('session-gui-888', '/mnt/d/DSHProjects/projA', 'deepseek-v4-pro')
   // 构造历史：3 条 user + 2 条 assistant
   gui.session.events.push(
     { seq: 1, type: 'user/message', data: { content: [{ type: 'text', text: '帮我看看项目' }] } },
@@ -328,12 +340,12 @@ console.log('12) /attach 发送最近历史')
   gui.session.events.push({ seq: 6, type: 'session/title', data: { title: '项目重构讨论' } })
   const agents = makeAgentsRegistry([gui])
   const { send, handler } = await boot(
-    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/workspace', tools: false, attachHistory: 3 },
+    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false, attachHistory: 3 },
     { agents, sessionTitle: { get: (s) => s.events.findLast(e => e.type === 'session/title')?.data } },
   )
   await handler({ chatId: 'oc_12', messageId: 'om_13', content: '/attach session-gui-888', senderId: 'ou_1' })
   await new Promise(r => setTimeout(r, 30))
-  const texts = send.map(s => s.input?.text ?? '')
+  const texts = send.map(s => textOf(s.input))
   const historyMsg = texts.find(t => t.includes('📜 最近对话'))
   assert.ok(historyMsg, '应发送历史消息')
   assert.ok(historyMsg.includes('👤 我：这个模块怎么改？'), '历史应包含最近的用户消息')
@@ -343,4 +355,56 @@ console.log('12) /attach 发送最近历史')
   ok('/attach 发送最近 3 条历史（不含最旧）')
 }
 
+
+// ── 13. feishu_push 推送到目标群 ─────────────────────────────
+console.log('13) feishu_push 推送到目标群')
+{
+  const regs = new Map()
+  const fakeTools = { register: (t) => { regs.set(t.name, t); return () => {} } }
+  const { ctx } = makeCtx({ tools: fakeTools })
+  apply(ctx, Config['~standard'].validate({ appId: 'a', appSecret: 's', mode: 'echo', pushChatId: 'oc_push_group' }).value)
+  const pushed = []
+  ctx.feishu.channel.send = async (to, input) => { pushed.push({ to, input }); return { messageId: 'om_p1' } }
+  const r = await regs.get('feishu_push').execute({ content: '📋 任务完成\n- 要点1' }, {})
+  assert.equal(r.pushed, true)
+  assert.equal(r.chat_id, 'oc_push_group')
+  assert.equal(pushed[0].to, 'oc_push_group')
+  assert.equal(pushed[0].input.text, '📋 任务完成\n- 要点1')
+  ok('feishu_push 推送到配置的目标群')
+  // 未配置时给出明确提示
+  const regs2 = new Map()
+  const ctx2 = makeCtx({ tools: { register: (t) => { regs2.set(t.name, t); return () => {} } } }).ctx
+  apply(ctx2, Config['~standard'].validate({ appId: 'a', appSecret: 's', mode: 'echo' }).value)
+  const r2 = await regs2.get('feishu_push').execute({ content: 'x' }, {})
+  assert.equal(r2.pushed, false)
+  assert.ok(r2.detail.includes('pushChatId'))
+  ok('未配置 pushChatId 时给出提示')
+}
+
+
+// ── 14. email_send 邮件工具 ─────────────────────────────────
+console.log('14) email_send 邮件工具')
+{
+  const regs = new Map()
+  const fakeTools = { register: (t) => { regs.set(t.name, t); return () => {} } }
+  const { ctx } = makeCtx({ tools: fakeTools })
+  apply(ctx, Config['~standard'].validate({
+    appId: 'a', appSecret: 's', mode: 'echo',
+    email: { host: '127.0.0.1', port: 1, user: 'tester@example.com', pass: 'pw' },
+  }).value)
+  assert.ok(regs.has('email_send'), '配置 email 后应注册 email_send')
+  const r = await regs.get('email_send').execute({ subject: '测试', content: '正文' }, {})
+  assert.equal(r.sent, false, '不可达 SMTP 应失败')
+  assert.equal(r.to, 'tester@example.com', '未配置 to 时默认发给自己')
+  assert.ok(r.detail && r.detail.length > 0, '失败应带 detail')
+  ok('email_send 注册 + 失败路径 + 默认收件人')
+
+  const regs2 = new Map()
+  const ctx2 = makeCtx({ tools: { register: (t) => { regs2.set(t.name, t); return () => {} } } }).ctx
+  apply(ctx2, Config['~standard'].validate({ appId: 'a', appSecret: 's', mode: 'echo' }).value)
+  assert.ok(!regs2.has('email_send'), '未配置 email 不应注册 email_send')
+  ok('未配置 email 时不注册（按需启用）')
+}
+
 console.log(`\n全部通过（${passed} 项断言组）✅`)
+

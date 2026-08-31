@@ -199,6 +199,7 @@ dsh --profile web
 | `requireMention` | boolean | `true` | 群聊中必须 @机器人 才回复 |
 | `respondToMentionAll` | boolean | `false` | 是否响应 @所有人 |
 | `mode` | `echo` \| `llm` \| `agent` | `llm` | 入站回复模式 |
+| `replyFormat` | `markdown` \| `text` | `markdown` | 回复排版：markdown 富文本（代码块/表格/列表完整渲染，agent 流式以卡片呈现）或纯文本 |
 | `systemPrompt` | string | 默认提示词 | `llm` 模式的系统提示词 |
 | `provider` | string | — | `llm` 模式的 provider 路由（如 `deepseek-official`） |
 | `model` | string | — | `llm` 模式的模型 id（如 `deepseek-v4-flash`） |
@@ -210,6 +211,8 @@ dsh --profile web
 | `resetCommands` | string[] | `['/new', '/reset']` | 重置上下文命令列表 |
 | `attachHistory` | number | `5` | /attach 接手后发送最近几条对话历史（0 = 不发） |
 | `tools` | boolean | `true` | 是否注册 `feishu_*` 模型工具 |
+| `pushChatId` | string | — | 飞书目标群 chat_id（`oc_` 开头）；配置后启用 `feishu_push` 工具（任务结果/定时推送直达该群） |
+| `email` | object | — | SMTP 邮件配置（`host`/`port`/`secure`/`user`/`pass`/`to`）；配置后启用 `email_send` 工具，凭证支持 `env:VAR` |
 
 ## 四、互动方式
 
@@ -297,6 +300,8 @@ dsh --profile web
 | `feishu_get_messages` | 拉取某会话最近消息（了解上下文） |
 | `feishu_get_chat_info` | 查询会话详情 |
 | `feishu_connection_status` | 查询长连接状态与机器人身份（诊断用） |
+| `feishu_push` | 把结果一键推送到配置的目标群（需 `pushChatId`；适合任务汇报、定时任务推送） |
+| `email_send` | 发送 SMTP 邮件通知（需 `email` 配置；收件人缺省发给自己） |
 
 `feishu_send_message` 的 `target` 支持 chat_id（`oc_` 开头）或用户 open_id（`ou_` 开头），
 SDK 按前缀自动推断接收方类型。

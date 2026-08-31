@@ -145,6 +145,16 @@ export class FeishuService extends Service {
     return this.channel.send(to, { card }, opts)
   }
 
+  /** 发送 markdown 卡片：card v2 的 markdown 元素，完整渲染代码块/表格/列表。 */
+  sendMarkdownCard(to: string, markdown: string, opts?: SendOptions): Promise<SendResult> {
+    return this.channel.send(to, { card: markdownCard(markdown) }, opts)
+  }
+
+  /** 更新已发送 markdown 卡片的内容（流式刷新用，需卡片的 update_multi 已开）。 */
+  updateMarkdownCard(messageId: string, markdown: string): Promise<void> {
+    return this.channel.updateCard(messageId, markdownCard(markdown))
+  }
+
   /**
    * 回复指定消息（只需 message_id，无需 chat_id）。官方 reply 接口仅支持
    * text / post / interactive 等类型。
@@ -221,6 +231,15 @@ export class FeishuService extends Service {
       memberCount: info.memberCount,
       ownerId: info.ownerId,
     }
+  }
+}
+
+/** 构造「单个 markdown 元素」的 card v2 结构（update_multi 允许流式多次更新）。 */
+export function markdownCard(markdown: string): object {
+  return {
+    schema: '2.0',
+    config: { update_multi: true },
+    body: { elements: [{ tag: 'markdown', content: markdown }] },
   }
 }
 

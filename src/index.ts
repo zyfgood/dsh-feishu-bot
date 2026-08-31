@@ -28,7 +28,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { FeishuService, type FeishuPolicyConfig } from './service.ts'
 import { attachInbound } from './inbound.ts'
-import { registerFeishuTools } from './tools.ts'
+import { registerFeishuTools, registerEmailTool } from './tools.ts'
+import type { EmailConfig } from './mail.ts'
 
 export const name = 'feishu-bot'
 
@@ -90,8 +91,20 @@ export interface Config {
    * 默认 5 条）。
    */
   attachHistory?: number
+  /**
+   * 飞书目标群 chat_id（oc_ 开头）。配置后 `feishu_push` 工具可用：
+   * 其他会话/定时任务的 agent 可把结果一键推送到该群。
+   */
+  pushChatId?: string
+  /**
+   * 邮件通知配置（SMTP）。配置后 `email_send` 工具可用：
+   * 发送任务结果/通知邮件（user/pass 支持 `env:VAR` 引用）。
+   */
+  email?: EmailConfig
   /** 是否注册模型可调用的 feishu_* 工具（默认 true）。 */
   tools?: boolean
+  /** 回复消息的排版格式：markdown（富文本渲染，默认）或 text（纯文本）。 */
+  replyFormat?: 'markdown' | 'text'
 }
 
 export const Config: z<Config> = z.object({
@@ -105,6 +118,8 @@ export const Config: z<Config> = z.object({
   requireMention: z.boolean().default(true),
   respondToMentionAll: z.boolean().default(false),
   mode: z.union(['echo', 'llm', 'agent'] as const).default('llm'),
+  /** 回复消息的排版格式：markdown 富文本渲染（代码块/表格/列表）或纯文本。 */
+  replyFormat: z.union(['markdown', 'text'] as const).default('markdown'),
   systemPrompt: z.string().default(
     '你是部署在飞书上的智能助手。请用简洁、友好的中文回答用户的问题；'
     + '涉及代码时直接给出可运行的代码块。',
@@ -118,6 +133,15 @@ export const Config: z<Config> = z.object({
   commands: z.boolean().default(true),
   resetCommands: z.array(z.string()).default(['/new', '/reset']),
   attachHistory: z.number().min(0).default(5),
+  pushChatId: z.string(),
+  email: z.object({
+    host: z.string().description('SMTP 服务器（如 smtp.163.com）'),
+    port: z.number().default(465),
+    secure: z.boolean().default(true),
+    user: z.string().description('发件账号，支持 env:VAR'),
+    pass: z.string().description('发件凭证/授权码，支持 env:VAR'),
+    to: z.string().description('默认收件人（不配置则发给自己）'),
+  }),
   tools: z.boolean().default(true),
 })
 
@@ -173,6 +197,18 @@ export function apply(ctx: Context, config: Config): void {
 
   // 出站互动：模型可调用 feishu_* 工具。
   if (config.tools !== false) {
-    registerFeishuTools(ctx, service)
+    registerFeishuTools(ctx, service, config.pushChatId)
+    // 邮件通知工具（配置了 email 段时启用；凭证支持 env: 引用）。
+    const email = config.email
+    if (email && email.host && email.user && email.pass) {
+      registerEmailTool(ctx, {
+        ...email,
+        user: resolveSecret(email.user),
+        pass: resolveSecret(email.pass),
+      })
+      ctx.logger.info(`feishu: 邮件通知已启用（${email.host}:${email.port ?? 465}，发件 ${email.user.slice(0, 3)}***）`)
+    } else if (email) {
+      ctx.logger.warn('feishu: email 配置不完整（需要 host/user/pass），跳过 email_send 工具注册')
+    }
   }
 }

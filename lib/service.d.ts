@@ -78,6 +78,10 @@ export declare class FeishuService extends Service {
     sendMarkdown(to: string, markdown: string, opts?: SendOptions): Promise<SendResult>;
     /** 发送交互卡片（card JSON）。 */
     sendCard(to: string, card: object, opts?: SendOptions): Promise<SendResult>;
+    /** 发送 markdown 卡片：card v2 的 markdown 元素，完整渲染代码块/表格/列表。 */
+    sendMarkdownCard(to: string, markdown: string, opts?: SendOptions): Promise<SendResult>;
+    /** 更新已发送 markdown 卡片的内容（流式刷新用，需卡片的 update_multi 已开）。 */
+    updateMarkdownCard(messageId: string, markdown: string): Promise<void>;
     /**
      * 回复指定消息（只需 message_id，无需 chat_id）。官方 reply 接口仅支持
      * text / post / interactive 等类型。
@@ -92,5 +96,7 @@ export declare class FeishuService extends Service {
     /** 查询会话详情。 */
     getChatInfo(chatId: string): Promise<FeishuChatSummary>;
 }
+/** 构造「单个 markdown 元素」的 card v2 结构（update_multi 允许流式多次更新）。 */
+export declare function markdownCard(markdown: string): object;
 export default FeishuService;
 //# sourceMappingURL=service.d.ts.map

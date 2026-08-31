@@ -25,6 +25,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
+import type { EmailConfig } from './mail.ts';
 export declare const name = "feishu-bot";
 export interface Config {
     /** 飞书自建应用的 App ID（cli_xxx）。支持 `env:VAR` 形式从环境变量读取。 */
@@ -84,8 +85,20 @@ export interface Config {
      * 默认 5 条）。
      */
     attachHistory?: number;
+    /**
+     * 飞书目标群 chat_id（oc_ 开头）。配置后 `feishu_push` 工具可用：
+     * 其他会话/定时任务的 agent 可把结果一键推送到该群。
+     */
+    pushChatId?: string;
+    /**
+     * 邮件通知配置（SMTP）。配置后 `email_send` 工具可用：
+     * 发送任务结果/通知邮件（user/pass 支持 `env:VAR` 引用）。
+     */
+    email?: EmailConfig;
     /** 是否注册模型可调用的 feishu_* 工具（默认 true）。 */
     tools?: boolean;
+    /** 回复消息的排版格式：markdown（富文本渲染，默认）或 text（纯文本）。 */
+    replyFormat?: 'markdown' | 'text';
 }
 export declare const Config: z<Config>;
 /** 把 `env:VAR` 形式的配置值解析为环境变量值。 */

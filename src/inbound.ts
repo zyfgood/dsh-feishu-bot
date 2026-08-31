@@ -51,6 +51,8 @@ interface ChatStream {
   timer?: ReturnType<typeof setTimeout>
   /** 是否在下一个工具调用时收尾（任务执行中回应问题的路径）。 */
   stopOnToolCall: boolean
+  /** 是否以 markdown 卡片模式流式（首条为卡片，后续 updateCard 更新）。 */
+  cardMode: boolean
 }
 
 /** 每个飞书会话的 agent 模式状态。 */
@@ -90,7 +92,10 @@ function collectAssistantText(events: readonly SessionEvent[], afterSeq: number)
   return parts.join('\n').trim()
 }
 
-/** 引用回复用户消息；失败时降级为直接发送到会话。 */
+/** 当前回复排版格式（attachInbound 时按配置设定，默认 markdown 富文本）。 */
+let replyFormat: 'markdown' | 'text' = 'markdown'
+
+/** 引用回复用户消息；markdown 模式优先富文本，失败逐级降级为纯文本。 */
 async function safeReply(
   ctx: Context,
   service: FeishuService,
@@ -98,16 +103,23 @@ async function safeReply(
   text: string,
 ): Promise<void> {
   if (!text) return
-  try {
-    await service.send(msg.chatId, { text }, { replyTo: msg.messageId })
-  } catch (error) {
-    ctx.logger.warn('feishu: 引用回复失败，尝试直接发送', error)
+  const inputs: Array<{ text: string } | { markdown: string }> =
+    replyFormat === 'markdown' ? [{ markdown: text }, { text }] : [{ text }]
+  for (const input of inputs) {
     try {
-      await service.send(msg.chatId, { text })
-    } catch (inner) {
-      ctx.logger.error('feishu: 发送回复失败', inner)
+      await service.send(msg.chatId, input, { replyTo: msg.messageId })
+      return
+    } catch (error) {
+      ctx.logger.warn('feishu: 引用回复失败，尝试降级/直接发送', error)
+      try {
+        await service.send(msg.chatId, input)
+        return
+      } catch (inner) {
+        ctx.logger.warn('feishu: 直接发送失败，继续降级', inner)
+      }
     }
   }
+  ctx.logger.error('feishu: 所有回复发送方式均失败')
 }
 
 /** 会话的可读标题：优先取 session-title 服务的折叠标题，其次用描述性兜底。 */
@@ -204,14 +216,34 @@ async function relayFlush(
   }
   try {
     if (relay.messageId === undefined) {
-      const result = await service.send(relay.chatId, { text })
-      relay.messageId = result.messageId
+      if (replyFormat === 'markdown') {
+        const result = await service.sendMarkdownCard(relay.chatId, text)
+        relay.messageId = result.messageId
+        relay.cardMode = true
+      } else {
+        const result = await service.send(relay.chatId, { text })
+        relay.messageId = result.messageId
+        relay.cardMode = false
+      }
+    } else if (relay.cardMode) {
+      await service.updateMarkdownCard(relay.messageId, text)
     } else {
       await service.channel.editMessage(relay.messageId, text)
     }
   } catch (error) {
-    ctx.logger.warn('feishu: 流式刷新消息失败（降级为后续整段发送）', error)
-    if (relay.messageId !== undefined) {
+    ctx.logger.warn('feishu: 流式刷新消息失败（卡片降级为纯文本续流）', error)
+    if (relay.cardMode) {
+      // 卡片发送/更新失败：降级为纯文本流式（重发一条文本，后续走 editMessage）。
+      relay.cardMode = false
+      relay.messageId = undefined
+      try {
+        const result = await service.send(relay.chatId, { text })
+        relay.messageId = result.messageId
+      } catch (inner) {
+        ctx.logger.warn('feishu: 降级纯文本发送仍失败，保留待重试', inner)
+        relay.messageId = undefined
+      }
+    } else if (relay.messageId !== undefined) {
       // 编辑失败时保留已发内容，后续重试编辑；这里只记录。
       relay.messageId = undefined
     }
@@ -429,7 +461,7 @@ async function agentReply(
   if (!agents || !isLiveAgent(agents, agent)) {
     ctx.logger.warn(`feishu: agent ${agent.id} 已被销毁，忽略本条消息`)
     const state = stateByChat.get(msg.chatId)
-    if (state?.bound?.id === agent.id) state.bound = undefined
+    if (state !== undefined && state.bound?.id === agent.id) state.bound = undefined
     await safeReply(ctx, service, msg, '（agent 会话已被销毁，请重新发送消息以新建会话）')
     return
   }
@@ -439,7 +471,7 @@ async function agentReply(
   // 任务执行中：steer 在下一个 step 边界消费，agent 会先回应再继续任务；
   // 回应通过流式实时转发，遇到下一个工具调用即收尾。
   if (agent.status === 'running') {
-    const relay: ChatStream = { chatId: msg.chatId, agentId: agent.id, text: '', stopOnToolCall: true }
+    const relay: ChatStream = { chatId: msg.chatId, agentId: agent.id, text: '', stopOnToolCall: true, cardMode: false }
     relays.set(agent.id, relay)
     agent.steer(message)
     await safeReply(ctx, service, msg, '📥 已收到。当前任务执行中，我会在任务的下一个节点回应你。')
@@ -447,7 +479,7 @@ async function agentReply(
   }
 
   // 空闲：followup 启动一轮，输出全程流式。
-  const relay: ChatStream = { chatId: msg.chatId, agentId: agent.id, text: '', stopOnToolCall: false }
+  const relay: ChatStream = { chatId: msg.chatId, agentId: agent.id, text: '', stopOnToolCall: false, cardMode: false }
   relays.set(agent.id, relay)
   agent.followup(message)
   await agent.whenIdle()
@@ -585,6 +617,7 @@ async function handleCommand(
  * 每个会话内的消息串行处理，避免并发回复交错。
  */
 export function attachInbound(ctx: Context, service: FeishuService, config: Config): void {
+  replyFormat = config.replyFormat ?? 'markdown'
   const queues = new Map<string, Promise<void>>()
   const history = new Map<string, Message[]>()
   const stateByChat = new Map<string, ChatBinding>()
