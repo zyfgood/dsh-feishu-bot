@@ -7,7 +7,7 @@
  * @module dsh-feishu-bot/service
  */
 import { Service, type Context } from '@deepseek-ai/cordis';
-import { type LarkChannel, type SendInput, type SendOptions, type SendResult, type WSConnectionStatus } from '@larksuiteoapi/node-sdk';
+import { type LarkChannel, type MarkdownStreamController, type SendInput, type SendOptions, type SendResult, type WSConnectionStatus } from '@larksuiteoapi/node-sdk';
 /** 入站消息策略（透传给官方 SDK 的 PolicyConfig）。 */
 export interface FeishuPolicyConfig {
     /** 私聊模式：open（默认）/ allowlist（白名单）/ pair（仅双向）/ disabled（关闭私聊）。 */
@@ -82,6 +82,13 @@ export declare class FeishuService extends Service {
     sendMarkdownCard(to: string, markdown: string, opts?: SendOptions): Promise<SendResult>;
     /** 更新已发送 markdown 卡片的内容（流式刷新用，需卡片的 update_multi 已开）。 */
     updateMarkdownCard(messageId: string, markdown: string): Promise<void>;
+    /**
+     * 原生卡片流式（cardkit 打字机效果）：占位卡片即时上屏，后续只传增量，
+     * 避免每次刷新把全文重新上传/重渲染。producer 用 controller 的
+     * append/setContent 推送内容，返回后 SDK 自动 finishStreamingCard（移除打字光标）。
+     * @returns 流式结束时的消息句柄（含最终 messageId）。
+     */
+    streamMarkdown(to: string, producer: (controller: MarkdownStreamController) => Promise<void>): Promise<SendResult>;
     /**
      * 回复指定消息（只需 message_id，无需 chat_id）。官方 reply 接口仅支持
      * text / post / interactive 等类型。

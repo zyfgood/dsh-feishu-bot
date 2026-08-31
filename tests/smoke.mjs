@@ -90,6 +90,18 @@ async function boot(configRaw, fakeServices = {}) {
   channel.send = async (to, input, opts) => { send.push({ to, input, opts }); return { messageId: `om_${send.length}` } }
   channel.editMessage = async (messageId, text) => { send.push({ to: 'EDIT', editMessageId: messageId, input: { text }, opts: undefined }) }
   channel.updateCard = async (messageId, card) => { send.push({ to: 'EDIT-CARD', editMessageId: messageId, input: { card }, opts: undefined }) }
+  // 原生卡片流式：producer 驱动 controller（append/setContent 记入 send），结束后返回 messageId。
+  channel.stream = async (to, input) => {
+    const producer = input.markdown
+    const controller = {
+      _messageId: `om_stream_${send.length + 1}`,
+      get messageId() { return this._messageId },
+      append: async (chunk) => { send.push({ to, input: { card: { body: { elements: [{ tag: 'markdown', content: chunk }] } } }, opts: undefined }) },
+      setContent: async (full) => { send.push({ to, input: { card: { body: { elements: [{ tag: 'markdown', content: full }] } } }, opts: undefined }) },
+    }
+    await producer(controller)
+    return { messageId: controller.messageId }
+  }
   const handler = channel['handlers'].message
   return { ctx, listeners, send, handler }
 }
@@ -291,7 +303,41 @@ console.log('10) 流式输出')
   const sentTexts = send.map(s => textOf(s.input)).filter(Boolean)
   assert.ok(sentTexts.length >= 1, '应有流式消息发出')
   assert.equal(sentTexts[sentTexts.length - 1], '你好，我是流式输出！', '最终文本完整')
-  ok('流式输出：首段发送 + 后续编辑更新')
+  assert.ok(send.every(s => s.to !== 'EDIT' && s.to !== 'EDIT-CARD'), '原生流式应走 channel.stream，而非旧编辑链路')
+  ok('流式输出：原生卡片流式（占位卡 + 增量上屏）')
+}
+
+// ── 10b. 原生流式：多次节流刷新只更新同一卡片，不新增消息 ──────
+console.log('10b) 原生流式增量刷新')
+{
+  const agents = makeAgentsRegistry()
+  const { listeners, send, handler } = await boot(
+    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false },
+    { agents, agentPresets: { defaultId: 'standard' } },
+  )
+  const realCreate = agents.create
+  agents.create = async (opts) => {
+    const h = await realCreate(opts)
+    const origFollowup = h.agent.followup.bind(h.agent)
+    // 让 agent 保持运行 ~1.2s，覆盖多个节流窗口，模拟真实流式节奏
+    h.agent.whenIdle = async () => { await new Promise(r => setTimeout(r, 1200)) }
+    h.agent.followup = () => {
+      origFollowup()
+      // 模拟 agent 流式输出，分多次（跨节流窗口）
+      const emit = (t) => listeners['session/event']?.forEach(fn => fn({ id: h.agent.id }, { type: 'assistant/chunk', data: { chunk: { type: 'text-delta', index: 0, text: t } } }))
+      emit('第一段。')
+      setTimeout(() => emit('第二段。'), 100)
+      setTimeout(() => emit('第三段，结束。'), 500)
+    }
+    return h
+  }
+  await handler({ chatId: 'oc_10b', messageId: 'om_10b', content: '多段流式', senderId: 'ou_1' })
+  await new Promise(r => setTimeout(r, 1300)) // 覆盖多个节流窗口 + 收尾
+  const streamCalls = send.filter(s => s.to !== 'EDIT' && s.to !== 'EDIT-CARD')
+  const texts = streamCalls.map(s => textOf(s.input)).filter(Boolean)
+  assert.ok(texts.length >= 2, `应有多次增量刷新（实际 ${texts.length}）`)
+  assert.equal(texts[texts.length - 1], '第一段。第二段。第三段，结束。', '最终内容完整且只更新同一卡片')
+  ok('原生流式：多次刷新更新同一卡片，最终文本完整')
 }
 
 // ── 11. 任务执行中回应（running → steer + 流式收尾） ──────────

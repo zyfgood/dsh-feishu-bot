@@ -21,7 +21,11 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { randomUUID } from 'node:crypto'
-import type { NormalizedMessage } from '@larksuiteoapi/node-sdk'
+import type {
+  MarkdownStreamController,
+  NormalizedMessage,
+  SendResult,
+} from '@larksuiteoapi/node-sdk'
 import {
   createAssistantMessage,
   createUserMessage,
@@ -43,15 +47,23 @@ interface ChatStream {
   chatId: string
   /** 归属的 agent id。 */
   agentId: string
-  /** 当前正在编辑的飞书消息 id（首段文本发出后建立）。 */
+  /** 当前正在编辑的飞书消息 id（旧链路使用；原生链路结束时回填）。 */
   messageId?: string
+  /** 原生卡片流式 run() 的 promise（进行中）；undefined = 未启动。 */
+  streamRun?: Promise<SendResult>
+  /** 原生流式控制器（producer 启动后可用；undefined = 未启动/已降级）。 */
+  streamController?: MarkdownStreamController
+  /** 结束信号：relayEnd/熔断时 resolve，producer 返回后 SDK 收尾卡片。 */
+  streamDone?: { promise: Promise<void>; resolve: () => void }
+  /** 原生流式已失败（启动或更新失败）→ 走旧降级链路。 */
+  streamFailed?: boolean
   /** 累积文本。 */
   text: string
   /** 待刷新的定时器。 */
   timer?: ReturnType<typeof setTimeout>
   /** 是否在下一个工具调用时收尾（任务执行中回应问题的路径）。 */
   stopOnToolCall: boolean
-  /** 是否以 markdown 卡片模式流式（首条为卡片，后续 updateCard 更新）。 */
+  /** 是否以 markdown 卡片模式流式（旧链路：首条为卡片，后续 updateCard 更新）。 */
   cardMode: boolean
   /** 复读熔断已触发：丢弃后续增量，不再转发。 */
   tripped?: boolean
@@ -248,9 +260,11 @@ async function sendRecentHistory(
   await safeReply(ctx, service, msg, `${head}${keep}${tail}`)
 }
 
-// ── 流式转发：agent 输出 → 飞书消息（首段 send，后续 editMessage 更新）──
+// ── 流式转发：agent 输出 → 飞书消息（首选原生卡片流式，降级旧链路）──
 
-/** 立即把累积文本刷到飞书；final=true 时清理转发会话。 */
+/** 立即把累积文本刷到飞书；final=true 时清理转发会话。
+ *  首选原生卡片流式（cardkit 打字机效果，只传增量）；启动/更新失败或
+ *  text 排版模式时降级为「首条卡片/文本 + 后续编辑更新」的旧链路。 */
 async function relayFlush(
   ctx: Context,
   service: FeishuService,
@@ -276,9 +290,82 @@ async function relayFlush(
   }
   const text = relay.text.trim()
   if (!text) {
-    if (final) relays.delete(relay.agentId)
+    if (final) {
+      relay.streamDone?.resolve() // 兜底：让已启动的流式正常收尾
+      relays.delete(relay.agentId)
+    }
     return
   }
+
+  // ── 原生卡片流式：已启动 → 只传增量；收尾/熔断时结束 ─────────
+  if (relay.streamRun !== undefined && !relay.streamFailed) {
+    if (relay.streamController !== undefined && text !== '') {
+      try {
+        // setContent 传全量累积文本，SDK 内部 diff 出增量再上屏（打字机效果）。
+        await relay.streamController.setContent(text)
+      } catch (error) {
+        ctx.logger.warn('feishu: 原生流式更新失败，降级为普通卡片流式', error)
+        relay.streamFailed = true
+        relay.streamController = undefined
+        // 让 producer 收尾（finishStreamingCard），避免占位卡停留在打字状态。
+        relay.streamDone?.resolve()
+        if (final) {
+          // 收尾原生流式，并用旧链路补发最终内容（新卡片/文本）。
+          try { await relay.streamRun } catch { /* 已降级 */ }
+          relays.delete(relay.agentId)
+          relay.messageId = undefined
+          relay.cardMode = false
+          return relayFlush(ctx, service, relays, relay, true)
+        }
+      }
+    }
+    if (final || relay.tripped) {
+      relay.streamDone?.resolve()
+      try {
+        const result = await relay.streamRun
+        relay.messageId = result.messageId
+      } catch {
+        // 启动失败已由下方 .catch 降级路径接管，这里只收尾。
+      }
+      relays.delete(relay.agentId)
+    }
+    return
+  }
+
+  // ── 原生卡片流式：未启动（首刷）→ 启动占位卡片 ──────────────
+  if (!relay.streamFailed && replyFormat === 'markdown') {
+    let resolveDone!: () => void
+    const done = new Promise<void>((res) => { resolveDone = res })
+    relay.streamDone = { promise: done, resolve: resolveDone }
+    relay.streamRun = service.streamMarkdown(relay.chatId, async (controller) => {
+      relay.streamController = controller
+      // 种子：启动前已累积的文本；后续内容由各次 flush 增量推送。
+      if (relay.text.trim() !== '') await controller.setContent(relay.text.trim())
+      await done
+    })
+    // 正常结束：回填 messageId（统计/日志用）。
+    relay.streamRun.then((result) => { relay.messageId = result.messageId }).catch(() => {})
+    // 启动失败（缺 cardkit 权限等）→ 降级旧链路重发普通卡片。
+    relay.streamRun.catch((error) => {
+      relay.streamFailed = true
+      relay.streamController = undefined
+      ctx.logger.warn('feishu: 原生卡片流式启动失败，降级为普通卡片流式', error)
+      void relayFlush(ctx, service, relays, relay, false)
+    })
+    if (final || relay.tripped) {
+      relay.streamDone?.resolve()
+      try {
+        const result = await relay.streamRun
+        relay.messageId = result.messageId
+      } catch {
+        // 降级路径接管发送。
+      }
+      relays.delete(relay.agentId)
+    }
+    return
+  }
+
+  // ── 旧链路（原生流式降级 / text 排版模式）────────────────────
   try {
     if (relay.messageId === undefined) {
       if (replyFormat === 'markdown') {

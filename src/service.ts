@@ -14,6 +14,7 @@ import {
   LoggerLevel,
   type LarkChannel,
   type LarkChannelOptions,
+  type MarkdownStreamController,
   type PolicyConfig,
   type SendInput,
   type SendOptions,
@@ -153,6 +154,19 @@ export class FeishuService extends Service {
   /** 更新已发送 markdown 卡片的内容（流式刷新用，需卡片的 update_multi 已开）。 */
   updateMarkdownCard(messageId: string, markdown: string): Promise<void> {
     return this.channel.updateCard(messageId, markdownCard(markdown))
+  }
+
+  /**
+   * 原生卡片流式（cardkit 打字机效果）：占位卡片即时上屏，后续只传增量，
+   * 避免每次刷新把全文重新上传/重渲染。producer 用 controller 的
+   * append/setContent 推送内容，返回后 SDK 自动 finishStreamingCard（移除打字光标）。
+   * @returns 流式结束时的消息句柄（含最终 messageId）。
+   */
+  streamMarkdown(
+    to: string,
+    producer: (controller: MarkdownStreamController) => Promise<void>,
+  ): Promise<SendResult> {
+    return this.channel.stream(to, { markdown: producer })
   }
 
   /**
