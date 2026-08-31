@@ -382,5 +382,38 @@ console.log('13) feishu_push 推送到目标群')
 }
 
 
+// ── 14. 复读熔断 detectTailRepetition ────────────────────────
+console.log('14) 复读熔断 detectTailRepetition')
+{
+  const { detectTailRepetition } = await import('../lib/inbound.js')
+
+  // 事故特征：长单元（总结段落）连续重复 → 命中
+  const unit = '总结：本次任务已完成。\n\n检查结果：一致。\n\n'
+  const looped = `前置正常内容。\n\n${unit.repeat(80)}`
+  const hit = detectTailRepetition(looped)
+  assert.ok(hit, '长单元复读应命中')
+  assert.ok(hit.repeats >= 6 && hit.totalLength >= 400, '命中应达到阈值')
+  assert.ok(hit.unitLength >= 4, '单元长度应 ≥ 4')
+
+  // 短语级复读（单元 8 字符 × 200 次）→ 命中
+  const hit2 = detectTailRepetition('好的好的好的好的'.repeat(50))
+  assert.ok(hit2, '短语复读应命中')
+
+  // 正常多样文本（各段内容互不相同）→ 不命中
+  const sections = []
+  for (let i = 1; i <= 30; i += 1) {
+    sections.push(`## 第 ${i} 节\n\n- 要点甲：数据 ${i * 7}\n- 要点乙：结论 ${i * 13}\n\n\`\`\`js\nconsole.log("line-${i}")\n\`\`\`\n\n| 列A | 列B |\n|---|---|\n| ${i} | ${i * 2} |\n`)
+  }
+  assert.equal(detectTailRepetition(sections.join('\n')), null, '各段互不相同的多样文本不应命中')
+
+  // 分隔线（单元 < 4 字符）→ 不命中
+  assert.equal(detectTailRepetition(`章节一\n\n${'─'.repeat(300)}`), null, '单字符分隔线不应命中')
+
+  // 短文本 → 不命中
+  assert.equal(detectTailRepetition('好好好好好好好好好'), null, '短文本不应命中')
+
+  ok('命中/不命中/阈值边界')
+}
+
 console.log(`\n全部通过（${passed} 项断言组）✅`)
 

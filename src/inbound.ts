@@ -53,6 +53,59 @@ interface ChatStream {
   stopOnToolCall: boolean
   /** 是否以 markdown 卡片模式流式（首条为卡片，后续 updateCard 更新）。 */
   cardMode: boolean
+  /** 复读熔断已触发：丢弃后续增量，不再转发。 */
+  tripped?: boolean
+}
+
+// ── 复读熔断：流式输出尾部大段完全重复时自动截断 ──────────────────
+// 背景：2026-08-31 一次 agent 回复退化成 7 万+ 字符的复读墙并实时
+// 推到了用户手机。特征是累积文本的尾部由同一单元（总结段落、短语）
+// 连续原样重复；正常输出（含 markdown 分隔线、表格、代码）不会出现
+// 数百字符以上的完全重复单元。
+
+/** 尾部重复检测结果。 */
+export interface TailRepetition {
+  /** 重复单元长度（字符）。 */
+  unitLength: number
+  /** 单元在尾部连续出现的次数。 */
+  repeats: number
+  /** 重复段总长（unitLength × repeats）。 */
+  totalLength: number
+}
+
+/** 检测窗口与阈值：窗口须容纳 MAX_UNIT × MIN_REPEATS。 */
+const REPETITION_WINDOW = 12_000
+const REPETITION_MIN_UNIT = 4
+const REPETITION_MAX_UNIT = 2_000
+const REPETITION_MIN_REPEATS = 6
+const REPETITION_MIN_TOTAL = 400
+/** 熔断截断时保留的重复次数（保留「确实在重复」的最小证据）。 */
+const REPETITION_KEEP_REPEATS = 2
+
+/**
+ * 检测 text 尾部是否由同一单元连续重复构成（复读循环特征）。
+ * 只检查最后 REPETITION_WINDOW 个字符；命中返回重复信息，否则 null。
+ * 单元下限 4 字符排除 `────`、`====` 这类分隔线；非重复文本在首个
+ * 比较即失配，扫描成本约为单元长度上限次快速比较。
+ */
+export function detectTailRepetition(text: string): TailRepetition | null {
+  const window = text.length > REPETITION_WINDOW ? text.slice(text.length - REPETITION_WINDOW) : text
+  if (window.length < REPETITION_MIN_TOTAL) return null
+  const maxUnit = Math.min(REPETITION_MAX_UNIT, Math.floor(window.length / REPETITION_MIN_REPEATS))
+  for (let unitLength = REPETITION_MIN_UNIT; unitLength <= maxUnit; unitLength += 1) {
+    const unit = window.slice(window.length - unitLength)
+    let repeats = 0
+    let end = window.length
+    while (end >= unitLength && window.slice(end - unitLength, end) === unit) {
+      repeats += 1
+      end -= unitLength
+    }
+    if (repeats >= REPETITION_MIN_REPEATS && repeats * unitLength >= REPETITION_MIN_TOTAL) {
+      // 最短命中单元已足以判定；更长单元只是同一现象的周期倍数。
+      return { unitLength, repeats, totalLength: repeats * unitLength }
+    }
+  }
+  return null
 }
 
 /** 每个飞书会话的 agent 模式状态。 */
@@ -209,6 +262,18 @@ async function relayFlush(
     clearTimeout(relay.timer)
     relay.timer = undefined
   }
+  // 复读熔断：尾部检出大段完全重复 → 截断保留少量重复 + 告警，并停流。
+  if (!relay.tripped) {
+    const repetition = detectTailRepetition(relay.text)
+    if (repetition) {
+      relay.tripped = true
+      const cut = relay.text.length - (repetition.totalLength - repetition.unitLength * REPETITION_KEEP_REPEATS)
+      relay.text = `${relay.text.slice(0, Math.max(0, cut)).trimEnd()}\n\n⚠️ 检测到输出异常重复（${repetition.unitLength} 字符 × ${repetition.repeats} 次），已自动截断。`
+      ctx.logger.warn(
+        `feishu: 复读熔断触发（agent=${relay.agentId}，单元 ${repetition.unitLength} 字符连续 ${repetition.repeats} 次，共 ${relay.text.length} 字符处截断）`,
+      )
+    }
+  }
   const text = relay.text.trim()
   if (!text) {
     if (final) relays.delete(relay.agentId)
@@ -248,7 +313,7 @@ async function relayFlush(
       relay.messageId = undefined
     }
   }
-  if (final) relays.delete(relay.agentId)
+  if (final || relay.tripped) relays.delete(relay.agentId)
 }
 
 /** 追加一段文本并安排节流刷新。 */
@@ -259,6 +324,7 @@ function relayAppend(
   relay: ChatStream,
   delta: string,
 ): void {
+  if (relay.tripped) return // 熔断后丢弃增量，等待 agent 自然结束
   relay.text += delta
   if (relay.timer === undefined) {
     relay.timer = setTimeout(() => {

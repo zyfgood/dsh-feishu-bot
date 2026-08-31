@@ -21,6 +21,22 @@
 import type { Context } from '@deepseek-ai/cordis';
 import type { FeishuService } from './service.ts';
 import type { Config } from './index.ts';
+/** 尾部重复检测结果。 */
+export interface TailRepetition {
+    /** 重复单元长度（字符）。 */
+    unitLength: number;
+    /** 单元在尾部连续出现的次数。 */
+    repeats: number;
+    /** 重复段总长（unitLength × repeats）。 */
+    totalLength: number;
+}
+/**
+ * 检测 text 尾部是否由同一单元连续重复构成（复读循环特征）。
+ * 只检查最后 REPETITION_WINDOW 个字符；命中返回重复信息，否则 null。
+ * 单元下限 4 字符排除 `────`、`====` 这类分隔线；非重复文本在首个
+ * 比较即失配，扫描成本约为单元长度上限次快速比较。
+ */
+export declare function detectTailRepetition(text: string): TailRepetition | null;
 /**
  * 订阅飞书长连接事件，按 config.mode 路由每条入站消息。
  * 每个会话内的消息串行处理，避免并发回复交错。
