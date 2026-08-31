@@ -166,7 +166,7 @@ console.log('6) agent 模式自动创建/复用')
   const agents = makeAgentsRegistry()
   const attached = []
   const { listeners, send, handler } = await boot(
-    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false },
+    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/workspace', tools: false },
     {
       agents,
       workspaceRegistry: {
@@ -191,7 +191,7 @@ console.log('7) /new 重置')
 {
   const agents = makeAgentsRegistry()
   const { send, handler } = await boot(
-    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false },
+    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/workspace', tools: false },
     { agents },
   )
   await handler({ chatId: 'oc_4', messageId: 'om_5', content: 'hi', senderId: 'ou_1' })
@@ -207,11 +207,11 @@ console.log('7) /new 重置')
 // ── 8. /sessions 可读列表 + 编号 /attach ─────────────────────
 console.log('8) /sessions + /attach 编号')
 {
-  const gui = makeAgent('session-gui-777', '/mnt/d/DSHProjects/projA', 'deepseek-v4-pro')
+  const gui = makeAgent('session-gui-777', '/workspace/projA', 'deepseek-v4-pro')
   gui.session.events.push({ seq: 1, type: 'session/title', data: { title: '帮我重构登录模块' } })
-  const agents = makeAgentsRegistry([gui, makeAgent('feishu-oc_5-abc12345', '/mnt/d/DSHProjects')])
+  const agents = makeAgentsRegistry([gui, makeAgent('feishu-oc_5-abc12345', '/workspace')])
   const { send, handler } = await boot(
-    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false },
+    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/workspace', tools: false },
     { agents, sessionTitle: { get: (s) => s.events.findLast(e => e.type === 'session/title')?.data } },
   )
   await handler({ chatId: 'oc_5', messageId: 'om_7', content: '/sessions', senderId: 'ou_1' })
@@ -246,7 +246,7 @@ console.log('9) 标准 agent preset')
     return realCreate(opts)
   }
   const { handler } = await boot(
-    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false },
+    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/workspace', tools: false },
     {
       agents,
       agentPresets: {
@@ -268,7 +268,7 @@ console.log('10) 流式输出')
 {
   const agents = makeAgentsRegistry()
   const { listeners, send, handler } = await boot(
-    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false },
+    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/workspace', tools: false },
     { agents, agentPresets: { defaultId: 'standard' } },
   )
   // 让 followup 触发流式 chunk（模拟 agent 输出）
@@ -299,7 +299,7 @@ console.log('11) 任务执行中回应')
 {
   const agents = makeAgentsRegistry()
   const { listeners, send, handler } = await boot(
-    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false },
+    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/workspace', tools: false },
     { agents, agentPresets: { defaultId: 'standard' } },
   )
   let live = null
@@ -328,7 +328,7 @@ console.log('11) 任务执行中回应')
 // ── 12. /attach 后发送最近历史 ───────────────────────────────
 console.log('12) /attach 发送最近历史')
 {
-  const gui = makeAgent('session-gui-888', '/mnt/d/DSHProjects/projA', 'deepseek-v4-pro')
+  const gui = makeAgent('session-gui-888', '/workspace/projA', 'deepseek-v4-pro')
   // 构造历史：3 条 user + 2 条 assistant
   gui.session.events.push(
     { seq: 1, type: 'user/message', data: { content: [{ type: 'text', text: '帮我看看项目' }] } },
@@ -340,7 +340,7 @@ console.log('12) /attach 发送最近历史')
   gui.session.events.push({ seq: 6, type: 'session/title', data: { title: '项目重构讨论' } })
   const agents = makeAgentsRegistry([gui])
   const { send, handler } = await boot(
-    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false, attachHistory: 3 },
+    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/workspace', tools: false, attachHistory: 3 },
     { agents, sessionTitle: { get: (s) => s.events.findLast(e => e.type === 'session/title')?.data } },
   )
   await handler({ chatId: 'oc_12', messageId: 'om_13', content: '/attach session-gui-888', senderId: 'ou_1' })
