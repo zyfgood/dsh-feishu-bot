@@ -212,6 +212,7 @@ dsh --profile web
 | `attachHistory` | number | `5` | /attach 接手后发送最近几条对话历史（0 = 不发） |
 | `questionTimeoutMs` | number | `600000` | 飞书侧确认问题等待回答的超时（ms，默认 10 分钟；超时自动取消该次询问，防止 agent 回合/会话队列被永久挂起） |
 | `persistSessions` | boolean | `true` | 是否持久化 chat→会话映射：dsh web 重启后自动 `resume` 原 DSH 会话，延续对话上下文（映射存于 `$DSH_HOME/feishu-bot/chat-sessions.json`） |
+| `segmentChars` | number | `8000` | 流式/卡片内容分段阈值（字符，1000~30000）：agent 输出（含大文件内容）超过该长度自动分多张卡片（多条消息）发送，按代码围栏/标题切，代码块不切断；原生卡片流式与旧降级链路均生效 |
 | `tools` | boolean | `true` | 是否注册 `feishu_*` 模型工具 |
 | `pushChatId` | string | — | 飞书目标群 chat_id（`oc_` 开头）；配置后启用 `feishu_push` 工具（任务结果/定时推送直达该群） |
 
@@ -360,6 +361,9 @@ SDK 按前缀自动推断接收方类型。按钮卡片（`feishu_ask_choice` / 
   并有超时兜底；若仍怀疑卡住，可在飞书发 `/new` 重置会话。
 - **重启后飞书对话上下文丢失**：v0.6.0 起默认持久化 chat→会话映射并自动恢复；
   确认 `persistSessions` 未被关闭、`$DSH_HOME/feishu-bot/chat-sessions.json` 可写。
+- **长文件/长代码不分段**：v0.6.1 起默认按 8000 字符（`segmentChars` 可调）自动分段，
+  按代码围栏/标题切分、代码块不切断，每段一条卡片消息；若觉得粒度不合适，
+  调小（如 4000）或调大（如 12000）后重启生效。
 - **卡片按钮点击无响应**：开放平台需已订阅**卡片交互回调**（长连接模式下在
   「事件与回调 → 事件订阅」勾选 `card.action.trigger`）并重新发布版本。
 

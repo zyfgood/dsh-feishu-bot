@@ -115,6 +115,12 @@ export interface Config {
    * 自动恢复原 DSH 会话（agents.resume），延续对话上下文。
    */
   persistSessions?: boolean
+  /**
+   * 流式/卡片内容的分段阈值（字符，默认 8000）：agent 输出（含大文件
+   * 内容）超过该长度时自动按代码围栏/标题分多张卡片（多条消息）发送，
+   * 不再一整段堆在一张卡片里。范围 1000~30000。
+   */
+  segmentChars?: number
 }
 
 export const Config: z<Config> = z.object({
@@ -132,6 +138,7 @@ export const Config: z<Config> = z.object({
   replyFormat: z.union(['markdown', 'text'] as const).default('markdown'),
   questionTimeoutMs: z.number().min(1000).default(600_000),
   persistSessions: z.boolean().default(true),
+  segmentChars: z.number().min(1000).max(30000).default(8000),
   systemPrompt: z.string().default(
     '你是部署在飞书上的智能助手。请用简洁、友好的中文回答用户的问题；'
     + '涉及代码时直接给出可运行的代码块。',
@@ -175,6 +182,10 @@ export function apply(ctx: Context, config: Config): void {
       requireMention: config.requireMention,
       respondToMentionAll: config.respondToMentionAll,
     } satisfies FeishuPolicyConfig,
+    // 流式卡片分段：超过 segmentChars 自动 rollover 成多张卡片（按代码围栏/标题切）。
+    outbound: {
+      streamMaxElementChars: config.segmentChars ?? 8000,
+    },
   })
 
   // 插件卸载时断开长连接。

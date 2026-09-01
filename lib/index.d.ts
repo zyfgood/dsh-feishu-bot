@@ -107,6 +107,12 @@ export interface Config {
      * 自动恢复原 DSH 会话（agents.resume），延续对话上下文。
      */
     persistSessions?: boolean;
+    /**
+     * 流式/卡片内容的分段阈值（字符，默认 8000）：agent 输出（含大文件
+     * 内容）超过该长度时自动按代码围栏/标题分多张卡片（多条消息）发送，
+     * 不再一整段堆在一张卡片里。范围 1000~30000。
+     */
+    segmentChars?: number;
 }
 export declare const Config: z<Config>;
 /** 把 `env:VAR` 形式的配置值解析为环境变量值。 */

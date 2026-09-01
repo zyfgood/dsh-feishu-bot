@@ -15,6 +15,7 @@ import {
   type LarkChannel,
   type LarkChannelOptions,
   type MarkdownStreamController,
+  type OutboundConfig,
   type PolicyConfig,
   type SendInput,
   type SendOptions,
@@ -44,6 +45,8 @@ export interface FeishuServiceOptions {
   domain?: 'feishu' | 'lark'
   loggerLevel?: 'fatal' | 'error' | 'warn' | 'info' | 'debug' | 'trace'
   policy?: FeishuPolicyConfig
+  /** SDK 出站配置（如流式卡片分段阈值 streamMaxElementChars）。 */
+  outbound?: OutboundConfig
 }
 
 /** 一个可被机器人访问的会话摘要（feishu_list_chats 工具的输出）。 */
@@ -98,6 +101,7 @@ export class FeishuService extends Service {
       },
       policy: options.policy as PolicyConfig | undefined,
       source: 'dsh-feishu-bot',
+      ...(options.outbound !== undefined ? { outbound: options.outbound } : {}),
     }
     this.channel = createLarkChannel(channelOptions)
   }

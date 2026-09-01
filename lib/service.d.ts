@@ -7,7 +7,7 @@
  * @module dsh-feishu-bot/service
  */
 import { Service, type Context } from '@deepseek-ai/cordis';
-import { type LarkChannel, type MarkdownStreamController, type SendInput, type SendOptions, type SendResult, type WSConnectionStatus } from '@larksuiteoapi/node-sdk';
+import { type LarkChannel, type MarkdownStreamController, type OutboundConfig, type SendInput, type SendOptions, type SendResult, type WSConnectionStatus } from '@larksuiteoapi/node-sdk';
 /** 入站消息策略（透传给官方 SDK 的 PolicyConfig）。 */
 export interface FeishuPolicyConfig {
     /** 私聊模式：open（默认）/ allowlist（白名单）/ pair（仅双向）/ disabled（关闭私聊）。 */
@@ -29,6 +29,8 @@ export interface FeishuServiceOptions {
     domain?: 'feishu' | 'lark';
     loggerLevel?: 'fatal' | 'error' | 'warn' | 'info' | 'debug' | 'trace';
     policy?: FeishuPolicyConfig;
+    /** SDK 出站配置（如流式卡片分段阈值 streamMaxElementChars）。 */
+    outbound?: OutboundConfig;
 }
 /** 一个可被机器人访问的会话摘要（feishu_list_chats 工具的输出）。 */
 export interface FeishuChatSummary {

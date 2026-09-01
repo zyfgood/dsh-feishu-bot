@@ -72,6 +72,52 @@ interface ChatStream {
   cardMode: boolean
   /** 复读熔断已触发：丢弃后续增量，不再转发。 */
   tripped?: boolean
+  /** 旧链路已补发的分段卡片数（首段之外，内容只增不减，发一次即可）。 */
+  extraSegments: number
+  /** 分段阈值（字符）：旧链路按代码围栏/标题分多张卡片。 */
+  segmentChars: number
+}
+
+/**
+ * 按代码围栏/标题把长文本切成 ≤ limit 的多段（与 SDK 内部同一算法）：
+ * - 按行切，绝不把行切半；
+ * - 代码块保持完整（超限时闭合 ```，下一段重新打开）；
+ * - 接近上限时优先在标题行（# 开头）断开。
+ */
+export function splitWithCodeFences(text: string, limit: number): string[] {
+  if (text.length <= limit) return [text]
+  const lines = text.split('\n')
+  const out: string[] = []
+  let buf: string[] = []
+  let bufLen = 0
+  let fenceLang: string | null = null
+  const flush = (): void => {
+    if (buf.length === 0) return
+    let chunk = buf.join('\n')
+    if (fenceLang !== null) chunk += '\n```'
+    out.push(chunk)
+    buf = []
+    bufLen = 0
+    if (fenceLang !== null) {
+      // 下一段重新打开代码块
+      buf.push(`\`\`\`${fenceLang}`)
+      bufLen = buf[0].length
+    }
+  }
+  for (const line of lines) {
+    const m = /^```(\w*)$/.exec(line)
+    const lineLen = line.length + (buf.length > 0 ? 1 : 0)
+    const isHeading = /^#{1,6}\s/.test(line)
+    const nearFull = bufLen > limit * 0.75
+    if (bufLen + lineLen > limit || (isHeading && nearFull && buf.length > 0)) {
+      flush()
+    }
+    buf.push(line)
+    bufLen += lineLen
+    if (m) fenceLang = fenceLang === null ? (m[1] || '') : null
+  }
+  flush()
+  return out
 }
 
 // ── 复读熔断：流式输出尾部大段完全重复时自动截断 ──────────────────
@@ -392,9 +438,11 @@ async function relayFlush(
 
   // ── 旧链路（原生流式降级 / text 排版模式）────────────────────
   try {
+    // 分段：首段持续编辑更新，超出的段作为独立卡片消息补发（内容只增不减）。
+    const segments = replyFormat === 'markdown' ? splitWithCodeFences(text, relay.segmentChars) : undefined
     if (relay.messageId === undefined) {
-      if (replyFormat === 'markdown') {
-        const result = await service.sendMarkdownCard(relay.chatId, text)
+      if (segments) {
+        const result = await service.sendMarkdownCard(relay.chatId, segments[0])
         relay.messageId = result.messageId
         relay.cardMode = true
       } else {
@@ -402,10 +450,23 @@ async function relayFlush(
         relay.messageId = result.messageId
         relay.cardMode = false
       }
-    } else if (relay.cardMode) {
-      await service.updateMarkdownCard(relay.messageId, text)
+    } else if (relay.cardMode && segments) {
+      await service.updateMarkdownCard(relay.messageId, segments[0])
     } else {
       await service.channel.editMessage(relay.messageId, text)
+    }
+    if (relay.cardMode && segments) {
+      // 超出首段的剩余内容：仅在收尾/熔断时补发（此时分段已定型，索引稳定、
+      // 内容完整——流式中途分段边界会随文本增长漂移，中途补发可能丢内容）。
+      if (final || relay.tripped) {
+        for (let i = 1; i < segments.length; i += 1) {
+          if (i > relay.extraSegments) {
+            const result = await service.sendMarkdownCard(relay.chatId, segments[i])
+            relay.extraSegments = i
+            void result
+          }
+        }
+      }
     }
   } catch (error) {
     ctx.logger.warn('feishu: 流式刷新消息失败（卡片降级为纯文本续流）', error)
@@ -714,7 +775,7 @@ async function agentReply(
   // 任务执行中：steer 在下一个 step 边界消费，agent 会先回应再继续任务；
   // 回应通过流式实时转发，遇到下一个工具调用即收尾。
   if (agent.status === 'running') {
-    const relay: ChatStream = { chatId: msg.chatId, agentId: agent.id, text: '', stopOnToolCall: true, cardMode: false }
+    const relay: ChatStream = { chatId: msg.chatId, agentId: agent.id, text: '', stopOnToolCall: true, cardMode: false, extraSegments: 0, segmentChars: config.segmentChars ?? 8000 }
     shared.relays.set(agent.id, relay)
     agent.steer(message)
     await safeReply(ctx, service, msg, '📥 已收到。当前任务执行中，我会在任务的下一个节点回应你。')
@@ -722,7 +783,7 @@ async function agentReply(
   }
 
   // 空闲：followup 启动一轮，输出全程流式。
-  const relay: ChatStream = { chatId: msg.chatId, agentId: agent.id, text: '', stopOnToolCall: false, cardMode: false }
+  const relay: ChatStream = { chatId: msg.chatId, agentId: agent.id, text: '', stopOnToolCall: false, cardMode: false, extraSegments: 0, segmentChars: config.segmentChars ?? 8000 }
   shared.relays.set(agent.id, relay)
   agent.followup(message)
   await agent.whenIdle()
@@ -758,7 +819,7 @@ async function trySteerRunning(
   }
   if (!agent || agent.status !== 'running') return false
   shared.chatByAgent.set(agent.id, msg.chatId)
-  const relay: ChatStream = { chatId: msg.chatId, agentId: agent.id, text: '', stopOnToolCall: true, cardMode: false }
+  const relay: ChatStream = { chatId: msg.chatId, agentId: agent.id, text: '', stopOnToolCall: true, cardMode: false, extraSegments: 0, segmentChars: config.segmentChars ?? 8000 }
   shared.relays.set(agent.id, relay)
   agent.steer(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }))
   await safeReply(ctx, service, msg, '📥 已收到。当前任务执行中，我会在任务的下一个节点回应你。')

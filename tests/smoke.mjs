@@ -646,5 +646,77 @@ console.log('18) 持久化映射 + resume 恢复')
   }
 }
 
+// ── 19. segmentChars 配置透传（原生流式分段阈值） ───────────────
+console.log('19) segmentChars 配置透传')
+{
+  const agents = makeAgentsRegistry()
+  const { ctx } = await boot(
+    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false, persistSessions: false, segmentChars: 5000 },
+    { agents, agentPresets: { defaultId: 'standard' } },
+  )
+  const opts = ctx.feishu.channel.opts
+  assert.ok(opts && opts.outbound, 'channel 应配置 outbound')
+  assert.equal(opts.outbound.streamMaxElementChars, 5000, 'streamMaxElementChars 应等于 segmentChars')
+  ok('segmentChars → SDK streamMaxElementChars 透传')
+  const agents2 = makeAgentsRegistry()
+  const { ctx: ctx2 } = await boot(
+    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false, persistSessions: false },
+    { agents: agents2, agentPresets: { defaultId: 'standard' } },
+  )
+  assert.equal(ctx2.feishu.channel.opts.outbound.streamMaxElementChars, 8000, '默认 8000')
+  ok('默认 segmentChars = 8000')
+}
+
+// ── 20. 旧链路分段：大内容拆成多张卡片，内容完整不丢失 ──────────
+console.log('20) 旧链路分段发送')
+{
+  const agents = makeAgentsRegistry()
+  // 让 agent 保持运行 ~1.3s，覆盖节流窗口 + 原生流式降级 + 收尾
+  const realCreate = agents.create
+  agents.create = async (opts) => {
+    const h = await realCreate(opts)
+    h.agent.whenIdle = async () => { await new Promise(r => setTimeout(r, 1300)) }
+    return h
+  }
+  const { listeners, send, handler, ctx } = await boot(
+    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false, persistSessions: false, segmentChars: 2000 },
+    { agents, agentPresets: { defaultId: 'standard' } },
+  )
+  // 强制原生流式启动失败 → 走旧降级链路
+  const channel = ctx.feishu.channel
+  channel.stream = async () => { throw new Error('no cardkit (test)') }
+  channel.send = async (to, input, opts) => { send.push({ to, input, opts }); return { messageId: `om_${send.length}` } }
+  channel.updateCard = async (messageId, card) => { send.push({ to: 'EDIT-CARD', editMessageId: messageId, input: { card }, opts: undefined }) }
+  channel.editMessage = async (messageId, text) => { send.push({ to: 'EDIT', editMessageId: messageId, input: { text }, opts: undefined }) }
+  const h = channel['handlers'].message
+  await h({ chatId: 'oc_20', messageId: 'om_20', content: '跑个长任务', senderId: 'ou_1' })
+  await new Promise(r => setTimeout(r, 30))
+  // 模拟 agent 输出一个带代码块的长文件（约 300 行，跨多个分段阈值）
+  const agent = agents.roots()[0]
+  const longLines = []
+  for (let i = 1; i <= 300; i += 1) longLines.push(`const line_${i} = ${i}; // 第 ${i} 行，凑长一些的内容让分段阈值生效`)
+  const fileText = '```python\n' + longLines.join('\n') + '\n```'
+  listeners['session/event']?.forEach(fn => fn({ id: agent.id }, { type: 'assistant/chunk', data: { chunk: { type: 'text-delta', index: 0, text: fileText } } }))
+  await new Promise(r => setTimeout(r, 1500)) // 覆盖节流窗口 + 原生流式降级 + 收尾
+  const cardSends = send.filter(s => s.input?.card && s.to !== 'EDIT-CARD')
+  assert.ok(cardSends.length >= 3, `应发送至少 3 张分段卡片（实际 ${cardSends.length}）`)
+  const joined = cardSends.map(s => {
+    const els = s.input.card.body?.elements ?? []
+    return els.filter(e => e.tag === 'markdown').map(e => e.content).join('\n')
+  }).join('\n')
+  for (const line of ['line_1', 'line_150', 'line_300']) {
+    assert.ok(joined.includes(line), `分段后应包含完整内容（${line}）`)
+  }
+  // 逐行校验：300 行全部不丢失（分段漂移会丢行，这里必须全在）
+  let missing = 0
+  for (let i = 1; i <= 300; i += 1) {
+    if (!joined.includes(`line_${i} =`)) missing += 1
+  }
+  assert.equal(missing, 0, `分段后应无丢失行（缺失 ${missing} 行）`)
+  const first = cardSends[0].input.card.body.elements.find(e => e.tag === 'markdown').content
+  assert.ok(first.length <= 2600, `首段应 ≤ 阈值+单行余量（实际 ${first.length}）`)
+  ok(`长文件旧链路自动分段（${cardSends.length} 张卡片，300 行内容完整无丢失）`)
+}
+
 console.log(`\n全部通过（${passed} 项断言组）✅`)
 

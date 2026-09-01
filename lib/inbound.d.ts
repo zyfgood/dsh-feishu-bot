@@ -54,7 +54,18 @@ interface ChatStream {
     cardMode: boolean;
     /** 复读熔断已触发：丢弃后续增量，不再转发。 */
     tripped?: boolean;
+    /** 旧链路已补发的分段卡片数（首段之外，内容只增不减，发一次即可）。 */
+    extraSegments: number;
+    /** 分段阈值（字符）：旧链路按代码围栏/标题分多张卡片。 */
+    segmentChars: number;
 }
+/**
+ * 按代码围栏/标题把长文本切成 ≤ limit 的多段（与 SDK 内部同一算法）：
+ * - 按行切，绝不把行切半；
+ * - 代码块保持完整（超限时闭合 ```，下一段重新打开）；
+ * - 接近上限时优先在标题行（# 开头）断开。
+ */
+export declare function splitWithCodeFences(text: string, limit: number): string[];
 /** 尾部重复检测结果。 */
 export interface TailRepetition {
     /** 重复单元长度（字符）。 */
