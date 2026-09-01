@@ -718,5 +718,33 @@ console.log('20) 旧链路分段发送')
   ok(`长文件旧链路自动分段（${cardSends.length} 张卡片，300 行内容完整无丢失）`)
 }
 
+// ── 21. feishu_* 工具输出不含 undefined（lossless JSON 校验） ──
+console.log('21) 工具输出无 undefined 字段')
+{
+  const regs = new Map()
+  const fakeTools = { register: (t) => { regs.set(t.name, t); return () => {} } }
+  const { ctx } = makeCtx({ tools: fakeTools })
+  apply(ctx, Config['~standard'].validate({ appId: 'a', appSecret: 's', mode: 'echo', tools: true }).value)
+  // 桩住 service：字段缺失/可选值为 undefined 的典型响应
+  ctx.feishu.channel.send = async () => ({ messageId: 'om_1' })
+  const svc = ctx.feishu
+  svc.listChats = async () => [{ chatId: 'oc_x', name: undefined, description: undefined, chatMode: undefined, ownerId: undefined }]
+  svc.listMessages = async () => [{
+    messageId: 'om_y', msgType: undefined, content: undefined,
+    senderId: undefined, senderName: undefined, createTime: undefined,
+  }]
+  svc.getChatInfo = async () => ({ chatId: 'oc_x', name: undefined, description: undefined, chatMode: 'group', memberCount: undefined, ownerId: undefined })
+  const chats = await regs.get('feishu_list_chats').execute({}, {})
+  const msgs = await regs.get('feishu_get_messages').execute({ chat_id: 'oc_x' }, {})
+  const info = await regs.get('feishu_get_chat_info').execute({ chat_id: 'oc_x' }, {})
+  for (const value of [chats, msgs, info]) {
+    // 递归检查无 undefined：JSON.stringify 往返不失真
+    const roundtrip = JSON.parse(JSON.stringify(value))
+    assert.deepEqual(roundtrip, value, '序列化往返应无失真（不允许 undefined 字段）')
+  }
+  assert.deepEqual(msgs[0], { message_id: 'om_y' }, '缺失字段应整体省略而非置 undefined')
+  ok('feishu_list_chats / feishu_get_messages / feishu_get_chat_info 输出无 undefined')
+}
+
 console.log(`\n全部通过（${passed} 项断言组）✅`)
 
