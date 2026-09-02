@@ -340,15 +340,19 @@ export function buildQuestionCard(pending: PendingQuestion): object {
         tag: 'markdown',
         content: q.options.map((label, i) => `${i + 1}. ${label}`).join('\n'),
       })
-      elements.push({
-        tag: 'action',
-        actions: q.options.map((label, i) => ({
+      // 按钮必须是 body.elements 的直接子元素：不能再包在 tag:'action'
+      // 容器里——卡片 JSON V2 不支持 action 容器（230099/200861
+      // 「cards of schema V2 no longer support this capability;
+      //  unsupported tag action」，2026-09-02 实测）。按钮文本用编号，
+      // 与上方列表对应；点击经 cardAction 事件回流 onCardAction。
+      for (const [i] of q.options.entries()) {
+        elements.push({
           tag: 'button',
           text: { tag: 'plain_text', content: String(i + 1) },
           type: i === 0 && index === 0 ? 'primary' : 'default',
           value: { feishu_q: pending.qid, q: q.id, o: String(i) },
-        })),
-      })
+        })
+      }
     }
   }
   return {

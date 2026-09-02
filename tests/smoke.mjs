@@ -495,11 +495,12 @@ console.log('15) 飞书版 ask_user_question（卡片确认闭环）')
     { agent: { id: agents.roots()[0].id }, signal: undefined },
   )
   await new Promise(r => setTimeout(r, 50))
-  const cardSend = send.find(s => s.input?.card?.body?.elements?.some(e => e.tag === 'action'))
+  const cardSend = send.find(s => s.input?.card?.body?.elements?.some(e => e.tag === 'button'))
   assert.ok(cardSend, '应发送带按钮的交互卡片')
-  const actionEl = cardSend.input.card.body.elements.find(e => e.tag === 'action')
-  assert.equal(actionEl.actions.length, 2, '两个选项对应两个按钮')
-  const qid = actionEl.actions[0].value.feishu_q
+  const buttons = cardSend.input.card.body.elements.filter(e => e.tag === 'button')
+  assert.equal(buttons.length, 2, '两个选项对应两个按钮（V2 平铺结构）')
+  assert.ok(!cardSend.input.card.body.elements.some(e => e.tag === 'action'), '不得使用 action 容器（V2 不支持 200861）')
+  const qid = buttons[0].value.feishu_q
   assert.ok(qid, '按钮 value 应携带 qid')
   assert.ok(send.some(s => typeof s.input?.text === 'string' && s.input.text.includes('编号')), '应有编号提示文本')
   // 模拟用户点击第二个按钮
@@ -923,6 +924,30 @@ console.log('25) /new 无活跃会话清除映射')
     else process.env.DSH_HOME = oldHome
     fs.rmSync(tmp, { recursive: true, force: true })
   }
+}
+
+// ── 26. 问题卡片 V2 结构回归：无 action 容器、按钮平铺、无 update_multi ──
+console.log('26) 问题卡片 V2 结构')
+{
+  const { buildQuestionCard } = await import('../lib/questions.js')
+  const card = buildQuestionCard({
+    qid: 'qid-test-1',
+    chatId: 'oc_x',
+    questions: [{ id: 'q1', header: '选择', question: '选哪个？', options: ['方案甲', '方案乙'], multiSelect: false }],
+  })
+  assert.equal(card.schema, '2.0', '应为 schema 2.0')
+  const elements = card.body.elements
+  assert.ok(!elements.some(e => e.tag === 'action'), '不允许 action 容器（V2 不支持，200861）')
+  assert.ok(!JSON.stringify(card).includes('update_multi'), '不应携带 update_multi 配置（300302）')
+  const buttons = elements.filter(e => e.tag === 'button')
+  assert.equal(buttons.length, 2, '选项数 = 按钮数')
+  assert.equal(buttons[0].type, 'primary', '首个选项按钮 primary')
+  assert.equal(buttons[1].type, 'default', '其余按钮 default')
+  assert.deepEqual(buttons[0].value, { feishu_q: 'qid-test-1', q: 'q1', o: '0' }, '按钮 value 编码 qid/question/option')
+  assert.deepEqual(buttons[1].value, { feishu_q: 'qid-test-1', q: 'q1', o: '1' }, '第二个按钮 option=1')
+  const tags = elements.map(e => e.tag)
+  assert.deepEqual(tags, ['markdown', 'markdown', 'button', 'button'], '结构：问题 md + 选项列表 md + 平铺按钮')
+  ok('问题卡片为 V2 合法结构（按钮平铺、无 action 容器、无 update_multi、value 正确）')
 }
 
 console.log(`\n全部通过（${passed} 项断言组）✅`)
