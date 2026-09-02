@@ -849,5 +849,81 @@ console.log('23) 超长单行不冻结')
   ok(`超长单行不冻结（原生 ${streamPushes.length} 次推送 + 尾卡 ${cardSends.length} 张 + 文本 ${textSends.length} 条，全文完整）`)
 }
 
+// ── 24. 激活被归档会话时自动取消归档（恢复工作区显示） ──────────
+console.log('24) 激活归档会话自动取消归档')
+{
+  // 24a: /attach 接手归档会话 → registry.setState 移除该会话
+  const archivedAgent = makeAgent('feishu-test-archived', '/mnt/d/DSHProjects')
+  const agents = makeAgentsRegistry([archivedAgent])
+  const setStateCalls = []
+  const fakeRegistry = {
+    archivedSessionIds: ['feishu-test-archived', 'other-archived'],
+    requireState: () => ({ archivedSessionIds: ['feishu-test-archived', 'other-archived'] }),
+    setState: async (state) => { setStateCalls.push([...state.archivedSessionIds]) },
+  }
+  const { handler } = await boot(
+    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false, persistSessions: false },
+    { agents, agentPresets: { defaultId: 'standard' }, workspaceRegistry: fakeRegistry },
+  )
+  await handler({ chatId: 'oc_24', messageId: 'om_24', content: '/attach feishu-test-archived', senderId: 'ou_1' })
+  await new Promise(r => setTimeout(r, 50))
+  assert.equal(setStateCalls.length, 1, '/attach 归档会话应触发取消归档')
+  assert.ok(!setStateCalls[0].includes('feishu-test-archived'), '被激活的会话应移出归档')
+  assert.ok(setStateCalls[0].includes('other-archived'), '其他归档会话应保留')
+  ok('/attach 接手归档会话自动取消归档')
+
+  // 24b: 消息驱动自动创建（非 attach）→ 同样取消归档
+  const agents2 = makeAgentsRegistry()
+  const realCreate = agents2.create
+  agents2.create = async (opts) => realCreate({ ...opts, sessionId: 'feishu-oc_24b-autoarchive' }) // 固定 id 便于断言
+  const setStateCalls2 = []
+  const fakeRegistry2 = {
+    archivedSessionIds: ['feishu-oc_24b-autoarchive', 'other-archived'],
+    requireState: () => ({ archivedSessionIds: ['feishu-oc_24b-autoarchive', 'other-archived'] }),
+    setState: async (state) => { setStateCalls2.push([...state.archivedSessionIds]) },
+  }
+  const { handler: handler2 } = await boot(
+    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false, persistSessions: false },
+    { agents: agents2, agentPresets: { defaultId: 'standard' }, workspaceRegistry: fakeRegistry2 },
+  )
+  const h2 = handler2
+  await h2({ chatId: 'oc_24b', messageId: 'om_24b', content: '你好', senderId: 'ou_1' })
+  await new Promise(r => setTimeout(r, 50))
+  assert.equal(setStateCalls2.length, 1, '消息激活新建会话应触发取消归档')
+  assert.ok(!setStateCalls2[0].includes('feishu-oc_24b-autoarchive'), '新建激活的会话应移出归档')
+  assert.ok(setStateCalls2[0].includes('other-archived'), '其他归档会话应保留')
+  ok('消息驱动（自动创建路径）同样自动取消归档')
+}
+
+// ── 25. /new 无活跃会话时清除持久化映射（下次消息真正新建） ─────
+console.log('25) /new 无活跃会话清除映射')
+{
+  const os = await import('node:os')
+  const path = await import('node:path')
+  const fs = await import('node:fs')
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'feishu-test-'))
+  const oldHome = process.env.DSH_HOME
+  process.env.DSH_HOME = tmp
+  try {
+    const storeDir = path.join(tmp, 'feishu-bot')
+    fs.mkdirSync(storeDir, { recursive: true })
+    fs.writeFileSync(path.join(storeDir, 'chat-sessions.json'), JSON.stringify({ oc_new: 'feishu-oc_new-oldmapping' }))
+    const agents = makeAgentsRegistry() // 无活跃会话
+    const { handler } = await boot(
+      { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false },
+      { agents, agentPresets: { defaultId: 'standard' } },
+    )
+    await handler({ chatId: 'oc_new', messageId: 'om_new', content: '/new', senderId: 'ou_1' })
+    await new Promise(r => setTimeout(r, 50))
+    const stored = JSON.parse(fs.readFileSync(path.join(storeDir, 'chat-sessions.json'), 'utf8'))
+    assert.equal(stored.oc_new, undefined, '无活跃会话时 /new 也应清除持久化映射')
+    ok('无活跃会话时 /new 清除持久化映射（下条消息真正新建会话）')
+  } finally {
+    if (oldHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = oldHome
+    fs.rmSync(tmp, { recursive: true, force: true })
+  }
+}
+
 console.log(`\n全部通过（${passed} 项断言组）✅`)
 

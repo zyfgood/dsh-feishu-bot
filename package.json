@@ -1,6 +1,6 @@
 {
   "name": "dsh-feishu-bot",
-  "version": "0.6.4",
+  "version": "0.6.5",
   "description": "DeepSeek Harness 插件：绑定飞书（Feishu/Lark）机器人并互动 — WebSocket 长连接接收消息、LLM/Agent 自动回复、模型可调用 feishu_* 工具",
   "type": "module",
   "main": "lib/index.js",

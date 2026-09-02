@@ -308,6 +308,34 @@ async function attachToWorkspace(ctx: Context, sessionId: string, workspacePath:
   }
 }
 
+/**
+ * 会话被机器人激活（创建/resume/接手/复用）时，若其处于「已归档」状态则
+ * 自动取消归档。背景（2026-09-02）：用户在 GUI 里归档了大量会话（含
+ * 飞书 bot 的旧会话），此后机器人 resume 同一会话继续对话，但归档会话在
+ * 工作区树中被隐藏——「机器人明明在干活，会话却不在列表里」。激活即恢复，
+ * 与 attachToWorkspace 一样是幂等动作；无 registry API 时静默跳过。
+ */
+async function unarchiveIfNeeded(ctx: Context, sessionId: string): Promise<void> {
+  const registry = ctx.get('workspaceRegistry') as
+    | {
+      archivedSessionIds?: readonly string[]
+      requireState?(): { archivedSessionIds?: readonly string[] }
+      setState?(state: { archivedSessionIds: readonly string[] }): Promise<unknown>
+    }
+    | undefined
+  if (!registry || !registry.requireState || !registry.setState) return
+  try {
+    const archived = registry.archivedSessionIds ?? registry.requireState().archivedSessionIds ?? []
+    if (!archived.includes(sessionId)) return
+    const next = archived.filter(id => id !== sessionId)
+    if (next.length === archived.length) return
+    await registry.setState({ ...registry.requireState(), archivedSessionIds: next })
+    ctx.logger.info(`feishu: 会话 ${sessionId} 已自动取消归档（恢复在工作区列表显示）`)
+  } catch (error) {
+    ctx.logger.warn(`feishu: 自动取消归档会话 ${sessionId} 失败（可在 GUI 归档管理中手动恢复）`, error)
+  }
+}
+
 /** 提取一条 user/assistant 消息的可见文本（截断到 maxChars）。 */
 function messageText(content: readonly ContentBlock[] | undefined, maxChars: number): string {
   const text = assistantText(content ?? [])
@@ -867,6 +895,8 @@ async function agentReply(
     await safeReply(ctx, service, msg, '（agent 会话已被销毁，请重新发送消息以新建会话）')
     return
   }
+  // 会话被激活：若曾被用户归档，自动取消归档（恢复在工作区树显示）。
+  void unarchiveIfNeeded(ctx, agent.id)
 
   const message = createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } })
 
@@ -917,6 +947,8 @@ async function trySteerRunning(
   }
   if (!agent || agent.status !== 'running') return false
   shared.chatByAgent.set(agent.id, msg.chatId)
+  // 会话被激活：若曾被用户归档，自动取消归档（恢复在工作区树显示）。
+  void unarchiveIfNeeded(ctx, agent.id)
   const relay: ChatStream = { chatId: msg.chatId, agentId: agent.id, text: '', stopOnToolCall: true, cardMode: false, extraSegments: 0, segmentChars: config.segmentChars ?? 8000 }
   shared.relays.set(agent.id, relay)
   agent.steer(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }))
@@ -958,7 +990,10 @@ async function handleCommand(
     } else if (config.agentId) {
       await safeReply(ctx, service, msg, `（当前绑定的是配置的 agentId（${config.agentId}），属于 GUI 会话，不能销毁。如需换会话请用 /attach。）`)
     } else {
-      await safeReply(ctx, service, msg, '（当前还没有会话，下一条消息将自动创建。）')
+      // 无活跃会话（重启后 /new）：同样清除持久化映射——否则下一条消息
+      // 会 resume 旧会话，用户以为开了新对话实则延续旧上下文（2026-09-02）。
+      shared.store?.delete(msg.chatId)
+      await safeReply(ctx, service, msg, '（当前没有活跃会话，已清除持久化映射；下一条消息将新建会话，上下文从零开始。）')
     }
     return true
   }
@@ -1032,6 +1067,8 @@ async function handleCommand(
       await safeReply(ctx, service, msg, `（未找到会话 ${id}。可用 /sessions 查看当前活跃会话。）`)
       return true
     }
+    // 接手被归档的会话时自动取消归档（恢复在工作区树显示）。
+    void unarchiveIfNeeded(ctx, agent.id)
     const state = shared.stateByChat.get(msg.chatId) ?? {}
     state.bound = agent
     shared.stateByChat.set(msg.chatId, state)
