@@ -746,5 +746,108 @@ console.log('21) 工具输出无 undefined 字段')
   ok('feishu_list_chats / feishu_get_messages / feishu_get_chat_info 输出无 undefined')
 }
 
+// ── 22. 原生流式钉头：超单卡上限时钉住头部，尾部切旧链路续传 ────
+console.log('22) 原生流式钉头切链路')
+{
+  const agents = makeAgentsRegistry()
+  // 让 agent 保持运行 ~1.3s，覆盖节流窗口 + 原生流式启动 + 钉头 + 收尾
+  const realCreate = agents.create
+  agents.create = async (opts) => {
+    const h = await realCreate(opts)
+    h.agent.whenIdle = async () => { await new Promise(r => setTimeout(r, 1300)) }
+    return h
+  }
+  const { listeners, send, handler, ctx } = await boot(
+    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false, persistSessions: false, segmentChars: 2000 },
+    { agents, agentPresets: { defaultId: 'standard' } },
+  )
+  let streamCalls = 0
+  const channel = ctx.feishu.channel
+  const origStream = channel.stream
+  channel.stream = async (to, input) => {
+    streamCalls += 1
+    return origStream(to, input)
+  }
+  const h = channel['handlers'].message
+  await h({ chatId: 'oc_22', messageId: 'om_22', content: '长报告', senderId: 'ou_1' })
+  await new Promise(r => setTimeout(r, 30))
+  // 模拟 agent 输出一个带代码块的长文件（约 300 行，远超单卡上限）
+  const agent = agents.roots()[0]
+  const longLines = []
+  for (let i = 1; i <= 300; i += 1) longLines.push(`const line_${i} = ${i}; // 第 ${i} 行，凑长一些的内容让分段阈值生效`)
+  const fileText = '```python\n' + longLines.join('\n') + '\n```'
+  listeners['session/event']?.forEach(fn => fn({ id: agent.id }, { type: 'assistant/chunk', data: { chunk: { type: 'text-delta', index: 0, text: fileText } } }))
+  await new Promise(r => setTimeout(r, 1500))
+  // 区分：原生流式推送（无 schema 字段）与旧链路卡片（schema: '2.0'）
+  const streamPushes = send.filter(s => s.input?.card && s.input.card.schema === undefined && s.input.card.body?.elements?.some(e => e.tag === 'markdown'))
+  const cardSends = send.filter(s => s.input?.card && s.input.card.schema === '2.0')
+  assert.equal(streamCalls, 1, '原生流式应只启动一次（钉头后不再重启）')
+  assert.ok(streamPushes.length >= 1, '原生卡片应有内容推送')
+  const head = streamPushes.map(s => s.input.card.body.elements.find(e => e.tag === 'markdown').content).join('\n')
+  const over = streamPushes.filter(s => s.input.card.body.elements.find(e => e.tag === 'markdown').content.length > 2200)
+  assert.equal(over.length, 0, `每次原生推送都应 ≤ 安全上限 + 单行余量（超限 ${over.length} 次，最长 ${Math.max(...streamPushes.map(s => s.input.card.body.elements.find(e => e.tag === 'markdown').content.length))}）`)
+  assert.ok(cardSends.length >= 1, '钉头后应通过旧链路发送尾段卡片')
+  const joined = [...streamPushes, ...cardSends].map(s => {
+    const els = s.input.card.body?.elements ?? []
+    return els.filter(e => e.tag === 'markdown').map(e => e.content).join('\n')
+  }).join('\n')
+  let missing = 0
+  for (let i = 1; i <= 300; i += 1) {
+    if (!joined.includes(`line_${i} =`)) missing += 1
+  }
+  assert.equal(missing, 0, `钉头切链路后内容应完整（缺失 ${missing} 行）`)
+  ok(`原生流式钉头 + 旧链路续传（原生推送 ${streamPushes.length} 次，尾段卡片 ${cardSends.length} 张，300 行完整无丢失）`)
+}
+
+// ── 23. 超长单行：钉头 + 旧链路兜底，不冻结、内容不丢 ───────────
+console.log('23) 超长单行不冻结')
+{
+  const agents = makeAgentsRegistry()
+  const realCreate = agents.create
+  agents.create = async (opts) => {
+    const h = await realCreate(opts)
+    h.agent.whenIdle = async () => { await new Promise(r => setTimeout(r, 1300)) }
+    return h
+  }
+  const { listeners, send, handler, ctx } = await boot(
+    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false, persistSessions: false, segmentChars: 2000 },
+    { agents, agentPresets: { defaultId: 'standard' } },
+  )
+  let streamCalls = 0
+  const channel = ctx.feishu.channel
+  const origStream = channel.stream
+  channel.stream = async (to, input) => {
+    streamCalls += 1
+    return origStream(to, input)
+  }
+  const h = channel['handlers'].message
+  await h({ chatId: 'oc_23', messageId: 'om_23', content: '长单行', senderId: 'ou_1' })
+  await new Promise(r => setTimeout(r, 30))
+  // 无换行的超长单行（6000 字符，内容无重复周期避免触发复读熔断）：
+  // SDK rollover 切不开的典型场景（超长 URL / minified 代码 / 大段数据）。
+  const agent = agents.roots()[0]
+  let x = 12345
+  let single = ''
+  for (let i = 0; i < 6000; i += 1) {
+    x = (x * 1103515245 + 12345) & 0x7fffffff
+    single += String(x % 10)
+  }
+  listeners['session/event']?.forEach(fn => fn({ id: agent.id }, { type: 'assistant/chunk', data: { chunk: { type: 'text-delta', index: 0, text: single } } }))
+  await new Promise(r => setTimeout(r, 1500))
+  const streamPushes = send.filter(s => s.input?.card && s.input.card.schema === undefined && s.input.card.body?.elements?.some(e => e.tag === 'markdown'))
+  const cardSends = send.filter(s => s.input?.card && s.input.card.schema === '2.0')
+  const textSends = send.filter(s => typeof s.input?.text === 'string')
+  assert.equal(streamCalls, 1, '原生流式应只启动一次')
+  assert.ok(streamPushes.length >= 1, '原生卡片应有头部推送')
+  const joined = [
+    ...streamPushes.map(s => s.input.card.body.elements.find(e => e.tag === 'markdown').content),
+    ...cardSends.map(s => s.input.card.body.elements.find(e => e.tag === 'markdown').content),
+    ...textSends.map(s => s.input.text),
+  ].join('')
+  assert.ok(joined.includes(single), '超长单行全文应完整送达（钉头 + 尾部兜底）')
+  assert.ok(joined.length >= 6000, `送达内容总长应 ≥ 6000（实际 ${joined.length}）`)
+  ok(`超长单行不冻结（原生 ${streamPushes.length} 次推送 + 尾卡 ${cardSends.length} 张 + 文本 ${textSends.length} 条，全文完整）`)
+}
+
 console.log(`\n全部通过（${passed} 项断言组）✅`)
 

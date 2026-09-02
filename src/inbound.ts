@@ -46,6 +46,20 @@ import type { ChatSessionStore } from './persistence.ts'
 /** 流式转发到飞书的节流间隔（ms）：飞书消息编辑有限频，聚合后批量更新。 */
 const STREAM_FLUSH_MS = 400
 
+/**
+ * 原生卡片单卡安全上限（字符）：飞书卡片 JSON 有 30KB 硬限制（错误码
+ * 200860），CJK 每字 3 字节，8000 字符 ≈ 24KB 留有安全余量。超过此值
+ * 的内容切旧链路分段发送（旧链路对超限卡片自动降级纯文本，内容不丢）。
+ */
+const NATIVE_CARD_SAFE_CHARS = 8000
+
+/**
+ * 原生卡片流式最长开启时间（ms）：飞书卡片流式模式超时自动关闭
+ * （错误码 200850，约 10 分钟）。agent 长任务中文本输出间隔可能很长，
+ * 提前钉住卡片切旧链路，避免流式中途失效后静默停止。
+ */
+const STREAM_MAX_OPEN_MS = 8 * 60_000
+
 /** 一个进行中的流式转发会话（按 agentId 索引）。 */
 interface ChatStream {
   /** 归属的飞书 chat_id。 */
@@ -62,6 +76,10 @@ interface ChatStream {
   streamDone?: { promise: Promise<void>; resolve: () => void }
   /** 原生流式已失败（启动或更新失败）→ 走旧降级链路。 */
   streamFailed?: boolean
+  /** 原生流式已钉头收尾（内容超单卡上限/超时）→ 不再重启，后续走旧链路。 */
+  nativeDone?: boolean
+  /** 原生流式启动时间戳（超时硬化用）。 */
+  streamStartedAt?: number
   /** 累积文本。 */
   text: string
   /** 待刷新的定时器。 */
@@ -334,8 +352,10 @@ async function sendRecentHistory(
 // ── 流式转发：agent 输出 → 飞书消息（首选原生卡片流式，降级旧链路）──
 
 /** 立即把累积文本刷到飞书；final=true 时清理转发会话。
- *  首选原生卡片流式（cardkit 打字机效果，只传增量）；启动/更新失败或
- *  text 排版模式时降级为「首条卡片/文本 + 后续编辑更新」的旧链路。 */
+ *  首选原生卡片流式（cardkit 打字机效果，只传增量）；原生卡片只承载
+ *  min(segmentChars, 8000) 以内的安全头部——超过上限或流式开启过久时
+ *  钉住当前卡片，尾部切「首条卡片 + 后续编辑更新」的旧链路续传（内容
+ *  完整不丢）；启动/更新失败或 text 排版模式时同样降级旧链路。 */
 async function relayFlush(
   ctx: Context,
   service: FeishuService,
@@ -368,56 +388,109 @@ async function relayFlush(
     return
   }
 
-  // ── 原生卡片流式：已启动 → 只传增量；收尾/熔断时结束 ─────────
+  // ── 原生卡片流式：已启动 → 只传增量；钉头/收尾/熔断时结束 ─────
   if (relay.streamRun !== undefined && !relay.streamFailed) {
+    let cutover = false
     if (relay.streamController !== undefined && text !== '') {
-      try {
-        // setContent 传全量累积文本，SDK 内部 diff 出增量再上屏（打字机效果）。
-        await relay.streamController.setContent(text)
-      } catch (error) {
-        ctx.logger.warn('feishu: 原生流式更新失败，降级为普通卡片流式', error)
-        relay.streamFailed = true
-        relay.streamController = undefined
-        // 让 producer 收尾（finishStreamingCard），避免占位卡停留在打字状态。
+      // 单卡安全上限：CJK 8000 字符 ≈ 24KB，低于飞书 30KB 卡片硬限制
+      // （200860）。超过上限或流式开启过久（飞书约 10 分钟自动关闭
+      // 200850）时钉住当前卡片，尾部交旧链路续传——原生路径绝不触发
+      // SDK 的 rollover：全量 setContent 触发 rollover 会刷重复卡片、
+      // 遇到超长单行还会在 SDK 内部静默冻结（streamingFailed 不抛给插件）。
+      const nativeCap = Math.min(relay.segmentChars, NATIVE_CARD_SAFE_CHARS)
+      const overdue = relay.streamStartedAt !== undefined && Date.now() - relay.streamStartedAt > STREAM_MAX_OPEN_MS
+      cutover = text.length > nativeCap || overdue
+      if (cutover) {
+        const chunks = splitWithCodeFences(text, nativeCap)
+        // 不可切分（超长单行）时按字符硬截头部，尾部照常续传，内容不丢。
+        const head = chunks.length > 1 ? chunks[0] : text.slice(0, nativeCap)
+        try {
+          await relay.streamController.setContent(head)
+        } catch (error) {
+          ctx.logger.warn('feishu: 原生流式钉头更新失败，直接切旧链路', error)
+        }
+        // 结束原生流式（finishStreamingCard 移除打字光标）。
         relay.streamDone?.resolve()
-        if (final) {
-          // 收尾原生流式，并用旧链路补发最终内容（新卡片/文本）。
-          try { await relay.streamRun } catch { /* 已降级 */ }
-          relays.delete(relay.agentId)
-          relay.messageId = undefined
-          relay.cardMode = false
-          return relayFlush(ctx, service, relays, relay, true)
+        try {
+          const result = await relay.streamRun
+          relay.messageId = result.messageId
+        } catch {
+          // 流式失败：标记降级，由下方旧链路续传（启动处 .catch 已按
+          // nativeDone 短路，不会重复处理）。
+          relay.streamFailed = true
+        }
+        relay.streamRun = undefined
+        relay.streamController = undefined
+        relay.nativeDone = true
+        relay.messageId = undefined
+        relay.cardMode = false
+        relay.extraSegments = 0
+        relay.text = chunks.length > 1 ? chunks.slice(1).join('\n') : text.slice(nativeCap)
+        ctx.logger.info(
+          `feishu: 原生流式钉头收尾（head=${head.length}，${overdue ? '超时' : `超上限 ${text.length} 字符`}），尾部 ${relay.text.length} 字符切旧链路`,
+        )
+        // 落到旧链路（不 return）：尾段卡片即时上屏，后续按旧链路刷新。
+      } else {
+        try {
+          // setContent 传全量累积文本，SDK 内部 diff 出增量再上屏（打字机效果）。
+          await relay.streamController.setContent(text)
+        } catch (error) {
+          ctx.logger.warn('feishu: 原生流式更新失败，降级为普通卡片流式', error)
+          relay.streamFailed = true
+          relay.streamController = undefined
+          // 让 producer 收尾（finishStreamingCard），避免占位卡停留在打字状态。
+          relay.streamDone?.resolve()
+          if (final) {
+            // 收尾原生流式，并用旧链路补发最终内容（新卡片/文本）。
+            try { await relay.streamRun } catch { /* 已降级 */ }
+            relays.delete(relay.agentId)
+            relay.messageId = undefined
+            relay.cardMode = false
+            return relayFlush(ctx, service, relays, relay, true)
+          }
         }
       }
     }
-    if (final || relay.tripped) {
-      relay.streamDone?.resolve()
-      try {
-        const result = await relay.streamRun
-        relay.messageId = result.messageId
-      } catch {
-        // 启动失败已由下方 .catch 降级路径接管，这里只收尾。
+    if (!cutover) {
+      if (final || relay.tripped) {
+        relay.streamDone?.resolve()
+        const run = relay.streamRun
+        if (run !== undefined) {
+          try {
+            const result = await run
+            relay.messageId = result.messageId
+          } catch {
+            // 启动失败已由下方 .catch 降级路径接管，这里只收尾。
+          }
+        }
+        relays.delete(relay.agentId)
       }
-      relays.delete(relay.agentId)
+      return
     }
-    return
+    // cutover：继续执行旧链路（relay.text 已替换为尾部）。
   }
 
   // ── 原生卡片流式：未启动（首刷）→ 启动占位卡片 ──────────────
-  if (!relay.streamFailed && replyFormat === 'markdown') {
+  if (!relay.streamFailed && !relay.nativeDone && replyFormat === 'markdown') {
+    const nativeCap = Math.min(relay.segmentChars, NATIVE_CARD_SAFE_CHARS)
     let resolveDone!: () => void
     const done = new Promise<void>((res) => { resolveDone = res })
     relay.streamDone = { promise: done, resolve: resolveDone }
+    relay.streamStartedAt = Date.now()
     relay.streamRun = service.streamMarkdown(relay.chatId, async (controller) => {
       relay.streamController = controller
-      // 种子：启动前已累积的文本；后续内容由各次 flush 增量推送。
-      if (relay.text.trim() !== '') await controller.setContent(relay.text.trim())
+      // 种子：启动前已累积的文本。单卡安全上限内正常播种；超上限只钉
+      // 头部（绝不把超限内容喂给 SDK，避免触发 rollover/静默冻结），
+      // 尾部由主流程切旧链路续传。
+      if (relay.text.trim() !== '') await controller.setContent(relay.text.trim().slice(0, nativeCap))
       await done
     })
     // 正常结束：回填 messageId（统计/日志用）。
     relay.streamRun.then((result) => { relay.messageId = result.messageId }).catch(() => {})
-    // 启动失败（缺 cardkit 权限等）→ 降级旧链路重发普通卡片。
+    // 启动失败（缺 cardkit 权限等）→ 降级旧链路重发普通卡片；
+    // 已钉头切链路的 relay 由主流程接管，这里短路避免双重发送。
     relay.streamRun.catch((error) => {
+      if (relay.nativeDone) return
       relay.streamFailed = true
       relay.streamController = undefined
       ctx.logger.warn('feishu: 原生卡片流式启动失败，降级为普通卡片流式', error)
@@ -425,35 +498,60 @@ async function relayFlush(
     })
     if (final || relay.tripped) {
       relay.streamDone?.resolve()
+      let ok = true
       try {
         const result = await relay.streamRun
         relay.messageId = result.messageId
       } catch {
-        // 降级路径接管发送。
+        // 流式失败：由上方 .catch 降级路径接管（旧链路全文重发），
+        // 这里不再补发，避免双重发送。
+        ok = false
       }
-      relays.delete(relay.agentId)
+      if (ok && relay.text.trim().length > nativeCap) {
+        // 首刷即超上限：原生卡片只承载头部，尾部切旧链路分段补发。
+        const full = relay.text.trim()
+        const chunks = splitWithCodeFences(full, nativeCap)
+        relay.nativeDone = true
+        relay.streamRun = undefined
+        relay.streamController = undefined
+        relay.messageId = undefined
+        relay.cardMode = false
+        relay.extraSegments = 0
+        relay.text = chunks.length > 1 ? chunks.slice(1).join('\n') : full.slice(nativeCap)
+        ctx.logger.info(
+          `feishu: 原生流式首刷即钉头收尾（head ≤ ${nativeCap}），尾部 ${relay.text.length} 字符切旧链路`,
+        )
+        // 落到旧链路（不 return）：final 时一次补发全部分段。
+      } else {
+        relays.delete(relay.agentId)
+        return
+      }
+    } else {
+      return
     }
-    return
   }
 
-  // ── 旧链路（原生流式降级 / text 排版模式）────────────────────
+  // ── 旧链路（原生流式降级 / 钉头切链路续传 / text 排版模式）────
+  // 注意：原生钉头切链路后 relay.text 已替换为尾部，这里必须重新读取
+  // （函数顶部的 text 快照此时已过期）。
+  const sendText = relay.text.trim()
   try {
     // 分段：首段持续编辑更新，超出的段作为独立卡片消息补发（内容只增不减）。
-    const segments = replyFormat === 'markdown' ? splitWithCodeFences(text, relay.segmentChars) : undefined
+    const segments = replyFormat === 'markdown' ? splitWithCodeFences(sendText, relay.segmentChars) : undefined
     if (relay.messageId === undefined) {
       if (segments) {
         const result = await service.sendMarkdownCard(relay.chatId, segments[0])
         relay.messageId = result.messageId
         relay.cardMode = true
       } else {
-        const result = await service.send(relay.chatId, { text })
+        const result = await service.send(relay.chatId, { text: sendText })
         relay.messageId = result.messageId
         relay.cardMode = false
       }
     } else if (relay.cardMode && segments) {
       await service.updateMarkdownCard(relay.messageId, segments[0])
     } else {
-      await service.channel.editMessage(relay.messageId, text)
+      await service.channel.editMessage(relay.messageId, sendText)
     }
     if (relay.cardMode && segments) {
       // 超出首段的剩余内容：仅在收尾/熔断时补发（此时分段已定型，索引稳定、
@@ -475,7 +573,7 @@ async function relayFlush(
       relay.cardMode = false
       relay.messageId = undefined
       try {
-        const result = await service.send(relay.chatId, { text })
+        const result = await service.send(relay.chatId, { text: sendText })
         relay.messageId = result.messageId
       } catch (inner) {
         ctx.logger.warn('feishu: 降级纯文本发送仍失败，保留待重试', inner)

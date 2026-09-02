@@ -44,6 +44,10 @@ interface ChatStream {
     };
     /** 原生流式已失败（启动或更新失败）→ 走旧降级链路。 */
     streamFailed?: boolean;
+    /** 原生流式已钉头收尾（内容超单卡上限/超时）→ 不再重启，后续走旧链路。 */
+    nativeDone?: boolean;
+    /** 原生流式启动时间戳（超时硬化用）。 */
+    streamStartedAt?: number;
     /** 累积文本。 */
     text: string;
     /** 待刷新的定时器。 */
