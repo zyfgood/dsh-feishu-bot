@@ -110,7 +110,7 @@ export declare class PendingQuestionState {
 export declare function parseAnswerText(pending: PendingQuestion, text: string): Map<string, string[]> | null;
 /** 确认交互卡片（schema 2.0，按钮 value 编码 qid/question/option）。 */
 export declare function buildQuestionCard(pending: PendingQuestion): object;
-/** 确认提示文本（卡片之外补一条，明确告知可回复编号）。 */
+/** 确认提示文本（卡片之外补一条，明确告知可回复编号；卡片发送失败时文本兜底可答）。 */
 export declare function buildQuestionHint(pending: PendingQuestion): string;
 /**
  * 为自动创建的飞书 agent 注册「飞书版 ask_user_question」。

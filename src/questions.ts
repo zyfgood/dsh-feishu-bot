@@ -175,7 +175,15 @@ export class PendingQuestionState {
 
   /** 发送确认交互卡片 + 编号提示文本（cardAction 主通道 + 文本兜底）。 */
   private async present(pending: PendingQuestion): Promise<void> {
-    await this.service.sendCard(pending.chatId, buildQuestionCard(pending))
+    try {
+      await this.service.sendCard(pending.chatId, buildQuestionCard(pending))
+    } catch (error) {
+      // 卡片发送失败（权限/格式/内容限制等）：不阻断确认流程——
+      // 提示文本含完整选项清单，用户回复编号/选项文字即可回答。
+      // （2026-09-02 事故：卡片因 update_multi:false 被飞书拒绝后，
+      //   present 直接抛错导致提示文本也未发送，任务静默停滞。）
+      this.ctx.logger.warn('feishu: 确认卡片发送失败，改用文本提示（可回复编号回答）', error)
+    }
     if (!pending.hinted) {
       pending.hinted = true
       await this.service.send(pending.chatId, { text: buildQuestionHint(pending) })
@@ -345,19 +353,28 @@ export function buildQuestionCard(pending: PendingQuestion): object {
   }
   return {
     schema: '2.0',
-    config: { update_multi: false },
+    // 注意：不能写 update_multi: false —— 飞书对交互卡片消息的创建会拒绝
+    // 显式 update_multi=false 的卡片（230099 / 300302「update_multi is
+    // false」，实测 2026-09-02）。静态确认卡片不需要独享模式，缺省即可。
     body: { elements },
   }
 }
 
-/** 确认提示文本（卡片之外补一条，明确告知可回复编号）。 */
+/** 确认提示文本（卡片之外补一条，明确告知可回复编号；卡片发送失败时文本兜底可答）。 */
 export function buildQuestionHint(pending: PendingQuestion): string {
   const summary = pending.questions.map(q => q.question).join('；')
+  const lines: string[] = []
+  for (const [qi, q] of pending.questions.entries()) {
+    lines.push(`${qi + 1}. ${q.header ? `【${q.header}】` : ''}${q.question}`)
+    if (q.options && q.options.length > 0) {
+      q.options.forEach((label, i) => lines.push(`    ${i + 1}. ${label}`))
+    }
+  }
   const first = pending.questions[0]
   const how = first?.options?.length
-    ? `请点击上方卡片按钮，或直接回复编号（如「1」）`
+    ? '请点击上方卡片按钮，或直接回复选项编号（如「1」）或选项文字'
     : '请直接回复你的回答'
-  return `🤔 需要你确认：${summary}\n${how}。`
+  return `🤔 需要你确认：${summary}\n${lines.join('\n')}\n${how}。`
 }
 
 /**
