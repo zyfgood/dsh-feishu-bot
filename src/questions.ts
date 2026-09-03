@@ -50,6 +50,8 @@ export interface PendingQuestion {
   questions: AskQuestion[]
   /** question id → 已选标签（按钮点击累积，文本回复覆盖）。 */
   answers: Map<string, string[]>
+  /** 问题卡片 message id（发送成功后回填，结束时回写结果视图）。 */
+  cardMessageId?: string
   resolve: (value: { answers: AskAnswerItem[] }) => void
   reject: (error: Error) => void
   /** 超时定时器（未答则 reject ASK_TIMEOUT）。 */
@@ -64,8 +66,30 @@ export interface PendingQuestion {
   onAbort?: () => void
 }
 
+/** 问答题结束方式（决定结果卡片视图）。 */
+export type QuestionOutcome =
+  | { kind: 'answered' }
+  | { kind: 'timeout' }
+  | { kind: 'cancelled' }
+  | { kind: 'aborted' }
+  | { kind: 'error'; message: string }
+
 /** 待确认状态：按 chatId 维护栈（同会话并发询问取最新未答），按 qid 索引。 */
 export class PendingQuestionState {
+  /**
+   * 发起问答前置钩子（inbound.ts 注入）：问题卡片上屏前收尾该会话当前
+   * 的原生打字机流式卡片。等待回答可能长达数分钟，而 cardkit 流式卡片
+   * 服务端 ~10 分钟自动关闭——等待期不收尾，回答后的续写就会撞上硬限、
+   * 原 卡冻结 + 新卡闪现（2026-09-03「选择后断流」事故）。
+   */
+  onAskPresented?: (chatId: string, agentId: string | undefined) => void
+  /**
+   * 问答回答钩子（inbound.ts 注入）：为回答后的续写立即上屏新占位
+   * 打字机卡片；relay 已不存在但 agent 仍在跑时重建 relay（steer 路径
+   * 的 ask），保证回答后的输出继续流式转发、不丢。
+   */
+  onAnswered?: (chatId: string, agentId: string | undefined) => void
+
   private readonly byChat = new Map<string, PendingQuestion[]>()
   private readonly byQid = new Map<string, PendingQuestion>()
 
@@ -117,12 +141,22 @@ export class PendingQuestionState {
         resolve: (value) => {
           if (pending.finished) return
           pending.finished = true
+          void this.finalizeCard(pending, { kind: 'answered' })
+          this.emitAnswered(pending)
           this.cleanup(pending)
           resolve(value)
         },
         reject: (error) => {
           if (pending.finished) return
           pending.finished = true
+          const code = (error as { code?: string }).code
+          void this.finalizeCard(pending, code === 'ASK_TIMEOUT'
+            ? { kind: 'timeout' }
+            : code === 'ASK_CANCELLED'
+              ? { kind: 'cancelled' }
+              : code === 'ASK_ABORTED'
+                ? { kind: 'aborted' }
+                : { kind: 'error', message: error.message })
           this.cleanup(pending)
           reject(error)
         },
@@ -141,6 +175,13 @@ export class PendingQuestionState {
         signal.addEventListener('abort', onAbort, { once: true })
       }
       this.push(pending)
+      // 通知流式转发层：即将上屏问题卡片，先优雅收尾当前打字机卡
+      //（等待期不烧 cardkit 流式 ~10 分钟寿命），回答后的输出开新卡续流。
+      try {
+        this.onAskPresented?.(chatId, agentId)
+      } catch (error) {
+        this.ctx.logger.warn('feishu: onAskPresented 钩子异常（不影响问答）', error)
+      }
       // 发送提示卡片与文本（发送失败不阻断等待，卡片失败时文本兜底）。
       void this.present(pending).catch((error: unknown) => {
         this.ctx.logger.warn('feishu: 发送确认卡片失败（用户仍可回复编号）', error)
@@ -176,7 +217,8 @@ export class PendingQuestionState {
   /** 发送确认交互卡片 + 编号提示文本（cardAction 主通道 + 文本兜底）。 */
   private async present(pending: PendingQuestion): Promise<void> {
     try {
-      await this.service.sendCard(pending.chatId, buildQuestionCard(pending))
+      const result = await this.service.sendCard(pending.chatId, buildQuestionCard(pending))
+      pending.cardMessageId = result.messageId // 结束时回写结果视图用
     } catch (error) {
       // 卡片发送失败（权限/格式/内容限制等）：不阻断确认流程——
       // 提示文本含完整选项清单，用户回复编号/选项文字即可回答。
@@ -187,6 +229,29 @@ export class PendingQuestionState {
     if (!pending.hinted) {
       pending.hinted = true
       await this.service.send(pending.chatId, { text: buildQuestionHint(pending) })
+    }
+  }
+
+  /** 触发 onAnswered 钩子（异常不外溢，不影响回答回流）。 */
+  private emitAnswered(pending: PendingQuestion): void {
+    try {
+      this.onAnswered?.(pending.chatId, pending.agentId)
+    } catch (error) {
+      this.ctx.logger.warn('feishu: onAnswered 钩子异常（不影响回答）', error)
+    }
+  }
+
+  /**
+   * 把问题卡片回写为结果视图（2026-09-03）：回答/超时/取消后卡片不再
+   * 留着一排可点的按钮，而是定格为「✅ 已选择：xx」等结果，用户一眼
+   * 看到当前进度。回写失败不影响回答本身（best effort）。
+   */
+  private async finalizeCard(pending: PendingQuestion, outcome: QuestionOutcome): Promise<void> {
+    if (pending.cardMessageId === undefined) return
+    try {
+      await this.service.updateCard(pending.cardMessageId, buildResultCard(pending, outcome))
+    } catch (error) {
+      this.ctx.logger.warn('feishu: 回写确认卡片结果失败（不影响回答）', error)
     }
   }
 
@@ -357,11 +422,39 @@ export function buildQuestionCard(pending: PendingQuestion): object {
   }
   return {
     schema: '2.0',
-    // 注意：不能写 update_multi: false —— 飞书对交互卡片消息的创建会拒绝
-    // 显式 update_multi=false 的卡片（230099 / 300302「update_multi is
-    // false」，实测 2026-09-02）。静态确认卡片不需要独享模式，缺省即可。
+    // update_multi: true：结束时要把这张卡 PATCH 成结果视图（已选择/
+    // 超时/取消）。注意只能显式写 true——显式 false 会被飞书拒绝创建
+    //（230099/300302，2026-09-02 实测）；true 与 markdownCard 链路一致。
+    config: { update_multi: true },
     body: { elements },
   }
+}
+
+/**
+ * 问答结束后的结果卡片（2026-09-03）：纯文本视图，不再有按钮——
+ * 回答后卡片定格为「✅ 已选择：xx」，超时/取消也如实标注，避免
+ * 用户点击后卡片毫无变化、还能反复点（旧交互的困惑点）。
+ */
+export function buildResultCard(pending: PendingQuestion, outcome: QuestionOutcome): object {
+  const outcomeText: Record<QuestionOutcome['kind'], string> = {
+    answered: '✅ 已确认',
+    timeout: '⏰ 等待超时，本次询问已取消',
+    cancelled: '🚫 已取消本次询问',
+    aborted: '⚠️ 本次询问已中止',
+    error: '⚠️ 本次询问出错',
+  }
+  const elements: object[] = []
+  for (const q of pending.questions) {
+    const selected = pending.answers.get(q.id) ?? []
+    const result = outcome.kind === 'answered' && selected.length > 0
+      ? `→ ✅ 已选择：${selected.join('、')}`
+      : `→ ${outcomeText[outcome.kind]}${outcome.kind === 'error' ? `（${outcome.message}）` : ''}`
+    elements.push({
+      tag: 'markdown',
+      content: `${q.header ? `**${q.header}**\n` : ''}${q.question}\n${result}`,
+    })
+  }
+  return { schema: '2.0', body: { elements } }
 }
 
 /** 确认提示文本（卡片之外补一条，明确告知可回复编号；卡片发送失败时文本兜底可答）。 */

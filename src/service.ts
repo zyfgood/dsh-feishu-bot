@@ -161,6 +161,15 @@ export class FeishuService extends Service {
   }
 
   /**
+   * 更新已发送卡片的内容（通用，card JSON 2.0）。问题卡片回答/超时后
+   * 回写结果视图用（questions.ts finalizeCard）；卡片需以 update_multi:
+   * true 创建（buildQuestionCard 已带）。
+   */
+  updateCard(messageId: string, card: object): Promise<void> {
+    return this.channel.updateCard(messageId, card)
+  }
+
+  /**
    * 原生卡片流式（cardkit 打字机效果）：占位卡片即时上屏，后续只传增量，
    * 避免每次刷新把全文重新上传/重渲染。producer 用 controller 的
    * append/setContent 推送内容，返回后 SDK 自动 finishStreamingCard（移除打字光标）。

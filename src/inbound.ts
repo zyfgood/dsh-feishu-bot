@@ -481,6 +481,61 @@ function closeOrphanStream(relay: ChatStream | undefined): void {
   })()
 }
 
+/**
+ * 确认问答发起时收尾当前原生流式卡片（2026-09-03「选择后断流」修复）：
+ *
+ * 事故链路：回合开始即开启打字机卡片 → agent 中途 ask_user_question，
+ * 等待用户点击数分钟（期间无任何文本）→ 飞书 cardkit 流式卡片服务端
+ * ~10 分钟自动关闭（200850）/ 插件 8 分钟钉头上限只在「下一批文本
+ * 到达」时才检查 → 回答后的续写到达时原卡早已冻结，只能切旧链路：
+ * 光标消失、原卡定格、闪现一张新空卡——用户看到的就是「选择后断流」。
+ *
+ * 修复：问题卡片上屏前主动优雅收尾当前打字机卡（finishStreamingCard
+ * 去光标、定格已有内容；尚无文本的占位卡给中性提示），并复位 relay 的
+ * 原生流状态；回答后的输出经 startNativeStream 开一张新的打字机卡
+ * 无缝续流。每张打字机卡的实际开启时间只覆盖真实输出段，永远在
+ * 服务端 10 分钟硬限之内，等待多久都不怕。
+ */
+async function pinRelayStreamForAsk(
+  ctx: Context,
+  service: FeishuService,
+  relays: Map<string, ChatStream>,
+  relay: ChatStream,
+): Promise<void> {
+  if (relay.streamRun === undefined || relay.streamDone === undefined) return
+  if (relay.streamFailed || relay.nativeDone) return
+  // 先清掉在途的节流定时器并把残留文本刷进当前卡（≤400ms 窗口内的
+  // 尾巴），避免钉头后定时器再触发、把旧文本播种进新卡。
+  try {
+    await relayFlush(ctx, service, relays, relay, false)
+  } catch { /* best effort */ }
+  if (relay.streamRun === undefined || relay.streamDone === undefined) return // flush 中已钉头/降级
+  // 占位卡还没有任何文本：定格为中性提示（否则 SDK 收尾会写默认英文占位）。
+  if (relay.streamController !== undefined && !relay.streamFailed && relay.text.trim() === '') {
+    try { await relay.streamController.setContent('（等你确认，见下方问题卡片）') } catch { /* best effort */ }
+  }
+  relay.streamDone.resolve()
+  try {
+    const result = await relay.streamRun
+    relay.messageId = result.messageId
+  } catch {
+    // 启动失败路径已由 .catch 降级处理，这里只需继续复位。
+  }
+  // 复位原生流状态：回答后的首批文本会重新 startNativeStream 开新卡。
+  relay.streamRun = undefined
+  relay.streamController = undefined
+  relay.streamDone = undefined
+  relay.streamFailed = false
+  relay.nativeDone = false
+  relay.streamStartedAt = undefined
+  // 旧卡已定格其内容；新卡从零开始承载回答后的续写（不重复播种旧文本）。
+  relay.messageId = undefined
+  relay.cardMode = false
+  relay.extraSegments = 0
+  relay.text = ''
+  ctx.logger.info(`feishu: 确认问答期间收尾打字机卡片（agent=${relay.agentId}），回答后开新卡续流`)
+}
+
 async function relayFlush(
   ctx: Context,
   service: FeishuService,
@@ -645,6 +700,13 @@ async function relayFlush(
   // 注意：原生钉头切链路后 relay.text 已替换为尾部，这里必须重新读取
   // （函数顶部的 text 快照此时已过期）。
   const sendText = relay.text.trim()
+  // 钉头切链路后尾部暂时为空：无内容可发就什么都不发（等后续增量或
+  // 收尾），绝不发出一张空卡片——2026-09-03 事故里用户看到的「断流
+  // 后闪现空卡」正是这里发出去的（总文本未超单卡上限时尾部长度为 0）。
+  if (sendText === '') {
+    if (final || relay.tripped) relays.delete(relay.agentId)
+    return
+  }
   try {
     // 分段：首段持续编辑更新，超出的段作为独立卡片消息补发（内容只增不减）。
     const segments = replyFormat === 'markdown' ? splitWithCodeFences(sendText, relay.segmentChars) : undefined
@@ -1531,6 +1593,36 @@ export function attachInbound(
     const relay = shared.relays.get(agent.id)
     if (relay) relayEnd(ctx, service, shared.relays, relay)
   })
+
+  // ── 确认问答 ↔ 流式转发协调（2026-09-03「选择后断流」修复）─────
+  // 发起问答：先收尾该会话当前的打字机卡片——等待回答的几分钟不该
+  // 烧 cardkit 流式的服务端 10 分钟寿命；问题卡片与后续续写的新卡
+  // 在时间线上分段清晰。agent 级 relay 优先，找不到再按 chatId 兜底
+  //（feishu_ask_choice 可由任意 agent 调用、只带 target chat_id）。
+  shared.questions.onAskPresented = (chatId, agentId) => {
+    const relay = agentId !== undefined
+      ? shared.relays.get(agentId)
+      : [...shared.relays.values()].find(r => r.chatId === chatId && !r.stopOnToolCall)
+    if (relay !== undefined) {
+      void pinRelayStreamForAsk(ctx, service, shared.relays, relay)
+    }
+  }
+  // 问答回答：为回答后的续写立即上屏新占位打字机卡（原生流状态已在
+  // 发起时复位，startNativeStream 会开新卡）；relay 已不存在但 agent
+  // 仍在跑（steer 路径中 ask 前流式已被收尾）时重建 relay，保证回答
+  // 后的输出继续流式转发、不会静默丢失。
+  shared.questions.onAnswered = (chatId, agentId) => {
+    if (agentId === undefined) return
+    let relay = shared.relays.get(agentId)
+    if (relay === undefined) {
+      const agents = ctx.get('agents') as AgentRegistry | undefined
+      const agent = agents?.get(SessionId(agentId))
+      if (!agent || agent.status !== 'running') return
+      relay = { chatId, agentId, text: '', stopOnToolCall: false, cardMode: false, extraSegments: 0, segmentChars: config.segmentChars ?? 8000 }
+      shared.relays.set(agentId, relay)
+    }
+    if (config.eagerPlaceholder !== false) relayShowPlaceholder(ctx, service, shared.relays, relay)
+  }
 
   service.channel.on({
     message: (msg) => {

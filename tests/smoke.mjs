@@ -926,7 +926,7 @@ console.log('25) /new 无活跃会话清除映射')
   }
 }
 
-// ── 26. 问题卡片 V2 结构回归：无 action 容器、按钮平铺、无 update_multi ──
+// ── 26. 问题卡片 V2 结构回归：无 action 容器、按钮平铺、update_multi 开启 ──
 console.log('26) 问题卡片 V2 结构')
 {
   const { buildQuestionCard } = await import('../lib/questions.js')
@@ -938,7 +938,10 @@ console.log('26) 问题卡片 V2 结构')
   assert.equal(card.schema, '2.0', '应为 schema 2.0')
   const elements = card.body.elements
   assert.ok(!elements.some(e => e.tag === 'action'), '不允许 action 容器（V2 不支持，200861）')
-  assert.ok(!JSON.stringify(card).includes('update_multi'), '不应携带 update_multi 配置（300302）')
+  // v0.8.0：回答/超时后要把这张卡 PATCH 成结果视图，必须以 update_multi:
+  // true 创建（显式 false 会被飞书拒绝创建——300302；true 与 markdownCard
+  // 链路一致，生产已验证可创建）。
+  assert.equal(card.config?.update_multi, true, '应显式开启 update_multi（供结果回写）')
   const buttons = elements.filter(e => e.tag === 'button')
   assert.equal(buttons.length, 2, '选项数 = 按钮数')
   assert.equal(buttons[0].type, 'primary', '首个选项按钮 primary')
@@ -947,7 +950,7 @@ console.log('26) 问题卡片 V2 结构')
   assert.deepEqual(buttons[1].value, { feishu_q: 'qid-test-1', q: 'q1', o: '1' }, '第二个按钮 option=1')
   const tags = elements.map(e => e.tag)
   assert.deepEqual(tags, ['markdown', 'markdown', 'button', 'button'], '结构：问题 md + 选项列表 md + 平铺按钮')
-  ok('问题卡片为 V2 合法结构（按钮平铺、无 action 容器、无 update_multi、value 正确）')
+  ok('问题卡片为 V2 合法结构（按钮平铺、无 action 容器、update_multi 开启、value 正确）')
 }
 
 // ── 27. 占位卡片（v0.6.7）：回合开始即上屏，首批文本后续写同一张卡 ──
@@ -1291,5 +1294,137 @@ console.log('32) /model 限制：接手/配置会话')
   ok('接手会话与 llm 模式给出明确限制提示')
 }
 
-console.log(`\n全部通过（${passed} 项断言组）✅`)
+// ── 33. 问答断流修复（v0.8.0）：ask 收尾旧打字机卡，回答后新卡续流 ──
+console.log('33) 问答断流修复：收尾旧卡 + 新卡续流')
+{
+  const agents = makeAgentsRegistry()
+  let releaseIdle
+  const realCreate = agents.create
+  agents.create = async (opts) => {
+    const h = await realCreate(opts)
+    h.agent.whenIdle = () => new Promise(r => { releaseIdle = r })
+    return h
+  }
+  const registeredTools = new Map()
+  const realCreate2 = agents.create
+  agents.create = async (opts) => {
+    if (opts.setup) {
+      const original = opts.setup
+      opts.setup = async (agentCtx) => {
+        const ctxWithTools = {
+          ...agentCtx,
+          get: (name) => name === 'tools' ? { register: (def) => { registeredTools.set(def.name, def); return () => {} } } : undefined,
+        }
+        await original(ctxWithTools)
+      }
+    }
+    return realCreate2(opts)
+  }
+  const { listeners, send, handler, ctx } = await boot(
+    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false, persistSessions: false },
+    { agents, agentPresets: { defaultId: 'standard' } },
+  )
+  let streamCalls = 0
+  const channel = ctx.feishu.channel
+  const origStream = channel.stream
+  channel.stream = async (to, input) => { streamCalls += 1; return origStream(to, input) }
 
+  const pending = handler({ chatId: 'oc_33', messageId: 'om_33', content: '先流式一段再问我', senderId: 'ou_1' })
+  await new Promise(r => setTimeout(r, 80))
+  const agent = agents.roots()[0]
+  const emit = (t) => listeners['session/event']?.forEach(fn => fn({ id: agent.id }, { type: 'assistant/chunk', data: { chunk: { type: 'text-delta', index: 0, text: t } } }))
+  // 阶段 1：回合内先流式一段文本（进入打字机卡 #1）
+  emit('先输出一段勘察结论。')
+  await new Promise(r => setTimeout(r, 600))
+  assert.equal(streamCalls, 1, '回合开始只应有 1 次原生流式（占位/续写同一张卡）')
+
+  // 阶段 2：agent 发起确认问答（模拟工具执行）
+  const askTool = registeredTools.get('ask_user_question')
+  assert.ok(askTool, 'agent 级 ask_user_question 应已注册')
+  const askPromise = askTool.execute(
+    { questions: [{ id: 'q1', question: '选哪个方案？', options: ['方案甲', '方案乙'] }] },
+    { agent: { id: agent.id }, signal: undefined },
+  )
+  await new Promise(r => setTimeout(r, 120))
+  // 旧打字机卡已被优雅收尾（不新开流式、不再推内容），问题卡片已发出
+  assert.equal(streamCalls, 1, '发起问答不应新开流式卡（旧卡收尾而非另开）')
+  const qCard = send.find(s => s.input?.card?.body?.elements?.some(e => e.tag === 'button'))
+  assert.ok(qCard, '问题卡片应已发送')
+  assert.equal(qCard.input.card.config?.update_multi, true, '问题卡片应开 update_multi 供结果回写')
+
+  // 阶段 3：用户点击第二个按钮
+  const cardAction = ctx.feishu.channel['handlers'].cardAction
+  const qid = qCard.input.card.body.elements.find(e => e.tag === 'button').value.feishu_q
+  await cardAction({ chatId: 'oc_33', messageId: 'om_c33', operator: { openId: 'ou_1' }, action: { tag: 'button', value: { feishu_q: qid, q: 'q1', o: '1' } } })
+  const result = await askPromise
+  assert.deepEqual(result.answers[0].selected, ['方案乙'], '点击应回流所选选项')
+  await new Promise(r => setTimeout(r, 80))
+  // 回答后：立即新开一张打字机卡（占位）承载续写
+  assert.equal(streamCalls, 2, '回答后应新开打字机卡续流')
+  // 问题卡片被回写为结果视图（无按钮、标注所选）
+  const editCard = send.find(s => s.to === 'EDIT-CARD')
+  assert.ok(editCard, '问题卡片应被回写结果视图')
+  const editedText = textOf({ card: editCard.input.card })
+  assert.ok(!JSON.stringify(editCard.input.card).includes('"button"'), '结果视图不应再有按钮')
+  assert.ok(editedText.includes('已选择：方案乙'), `结果视图应显示所选（实际：${editedText}）`)
+
+  // 阶段 4：回答后的续写文本 → 新打字机卡续流（不冻结、不另发旧链路卡片）
+  emit('收到选择，按方案乙继续输出结论。')
+  await new Promise(r => setTimeout(r, 600))
+  const streamPushes = send.filter(s => s.input?.card && s.input.card.schema === undefined && s.input.card.body?.elements?.some(e => e.tag === 'markdown'))
+  const newCardTexts = streamPushes.map(s => textOf(s.input))
+  assert.ok(newCardTexts.some(t => t.includes('按方案乙继续输出结论')), `续写应进入新打字机卡（实际：${JSON.stringify(newCardTexts)}）`)
+  // 不应出现空卡片（schema 2.0 且内容为空）
+  assert.ok(!send.some(s => s.input?.card?.schema === '2.0' && textOf(s.input) === ''), '不应发送空卡片（断流闪现空卡已修复）')
+
+  releaseIdle()
+  await pending
+  await new Promise(r => setTimeout(r, 80))
+  assert.equal(streamCalls, 2, '整回合恰好两张打字机卡（问答前后各一张）')
+  const finalTexts = streamPushes.map(s => textOf(s.input))
+  assert.ok(finalTexts[finalTexts.length - 1].includes('按方案乙继续输出结论'), '收尾内容完整')
+  ok('问答断流修复：ask 收尾旧卡 → 点击回写结果 → 回答后新打字机卡续流、无空卡')
+}
+
+// ── 34. 问题卡片结果回写：超时也定格为结果视图 ──────────────────
+console.log('34) 问题卡片超时结果回写')
+{
+  const agents = makeAgentsRegistry()
+  const registeredTools = new Map()
+  const realCreate = agents.create
+  agents.create = async (opts) => {
+    if (opts.setup) {
+      const original = opts.setup
+      opts.setup = async (agentCtx) => {
+        const ctxWithTools = {
+          ...agentCtx,
+          get: (name) => name === 'tools' ? { register: (def) => { registeredTools.set(def.name, def); return () => {} } } : undefined,
+        }
+        await original(ctxWithTools)
+      }
+    }
+    return realCreate(opts)
+  }
+  const { send, handler } = await boot(
+    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false, persistSessions: false, questionTimeoutMs: 1100 },
+    { agents, agentPresets: { defaultId: 'standard' } },
+  )
+  await handler({ chatId: 'oc_34', messageId: 'om_34', content: '你好', senderId: 'ou_1' })
+  await new Promise(r => setTimeout(r, 30))
+  const askTool = registeredTools.get('ask_user_question')
+  const promise = askTool.execute(
+    { questions: [{ id: 'q1', question: '等谁？', options: ['A', 'B'] }] },
+    { agent: { id: agents.roots()[0].id }, signal: undefined },
+  )
+  await assert.rejects(promise, (err) => err.code === 'ASK_TIMEOUT')
+  await new Promise(r => setTimeout(r, 80))
+  const editCard = send.find(s => s.to === 'EDIT-CARD')
+  assert.ok(editCard, '超时后问题卡片应被回写结果视图')
+  const editedText = textOf({ card: editCard.input.card })
+  assert.ok(editedText.includes('超时'), `超时视图应标注超时（实际：${editedText}）`)
+  assert.ok(!JSON.stringify(editCard.input.card).includes('"button"'), '超时视图不应再有按钮')
+  ok('超时兜底：卡片定格为超时结果视图，按钮不再可点')
+}
+
+console.log(`
+全部通过（${passed} 项断言组）✅`)

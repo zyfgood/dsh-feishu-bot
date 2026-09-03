@@ -44,6 +44,8 @@ export interface PendingQuestion {
     questions: AskQuestion[];
     /** question id → 已选标签（按钮点击累积，文本回复覆盖）。 */
     answers: Map<string, string[]>;
+    /** 问题卡片 message id（发送成功后回填，结束时回写结果视图）。 */
+    cardMessageId?: string;
     resolve: (value: {
         answers: AskAnswerItem[];
     }) => void;
@@ -59,11 +61,37 @@ export interface PendingQuestion {
     /** 中止监听器引用（cleanup 时移除）。 */
     onAbort?: () => void;
 }
+/** 问答题结束方式（决定结果卡片视图）。 */
+export type QuestionOutcome = {
+    kind: 'answered';
+} | {
+    kind: 'timeout';
+} | {
+    kind: 'cancelled';
+} | {
+    kind: 'aborted';
+} | {
+    kind: 'error';
+    message: string;
+};
 /** 待确认状态：按 chatId 维护栈（同会话并发询问取最新未答），按 qid 索引。 */
 export declare class PendingQuestionState {
     private readonly ctx;
     private readonly service;
     private readonly timeoutMs;
+    /**
+     * 发起问答前置钩子（inbound.ts 注入）：问题卡片上屏前收尾该会话当前
+     * 的原生打字机流式卡片。等待回答可能长达数分钟，而 cardkit 流式卡片
+     * 服务端 ~10 分钟自动关闭——等待期不收尾，回答后的续写就会撞上硬限、
+     * 原 卡冻结 + 新卡闪现（2026-09-03「选择后断流」事故）。
+     */
+    onAskPresented?: (chatId: string, agentId: string | undefined) => void;
+    /**
+     * 问答回答钩子（inbound.ts 注入）：为回答后的续写立即上屏新占位
+     * 打字机卡片；relay 已不存在但 agent 仍在跑时重建 relay（steer 路径
+     * 的 ask），保证回答后的输出继续流式转发、不丢。
+     */
+    onAnswered?: (chatId: string, agentId: string | undefined) => void;
     private readonly byChat;
     private readonly byQid;
     constructor(ctx: Context, service: FeishuService, timeoutMs: number);
@@ -89,6 +117,14 @@ export declare class PendingQuestionState {
     cancelFor(chatId: string): boolean;
     /** 发送确认交互卡片 + 编号提示文本（cardAction 主通道 + 文本兜底）。 */
     private present;
+    /** 触发 onAnswered 钩子（异常不外溢，不影响回答回流）。 */
+    private emitAnswered;
+    /**
+     * 把问题卡片回写为结果视图（2026-09-03）：回答/超时/取消后卡片不再
+     * 留着一排可点的按钮，而是定格为「✅ 已选择：xx」等结果，用户一眼
+     * 看到当前进度。回写失败不影响回答本身（best effort）。
+     */
+    private finalizeCard;
     /**
      * 尝试把一条入站文本当作问题回答消费掉。命中返回 true（消息已处理，
      * 不应再走命令/agent 路由）；未命中返回 false。
@@ -110,6 +146,12 @@ export declare class PendingQuestionState {
 export declare function parseAnswerText(pending: PendingQuestion, text: string): Map<string, string[]> | null;
 /** 确认交互卡片（schema 2.0，按钮 value 编码 qid/question/option）。 */
 export declare function buildQuestionCard(pending: PendingQuestion): object;
+/**
+ * 问答结束后的结果卡片（2026-09-03）：纯文本视图，不再有按钮——
+ * 回答后卡片定格为「✅ 已选择：xx」，超时/取消也如实标注，避免
+ * 用户点击后卡片毫无变化、还能反复点（旧交互的困惑点）。
+ */
+export declare function buildResultCard(pending: PendingQuestion, outcome: QuestionOutcome): object;
 /** 确认提示文本（卡片之外补一条，明确告知可回复编号；卡片发送失败时文本兜底可答）。 */
 export declare function buildQuestionHint(pending: PendingQuestion): string;
 /**
