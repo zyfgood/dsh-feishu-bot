@@ -374,7 +374,17 @@ async function sendRecentHistory(
 ): Promise<void> {
   if (count <= 0) return
   const rows: string[] = []
-  for (const event of agent.session.events) {
+  // dsh 0.1.2 移除了 Session.events getter（改为按需的 snapshotEvents()/eventAt()）。
+  // 特性检测双兼容：新内核走 snapshotEvents()（默认参数 = 全量日志，与旧 .events 同语义），
+  // 旧内核（≤0.1.1）走 events。类型用结构化声明，两代内核的 .d.ts 都能编译。
+  const session = agent.session as unknown as {
+    snapshotEvents?: () => readonly SessionEvent[]
+    events?: readonly SessionEvent[]
+  }
+  const events = typeof session.snapshotEvents === 'function'
+    ? session.snapshotEvents()
+    : (session.events ?? [])
+  for (const event of events) {
     if (event.type === 'user/message') {
       const data = event.data as { content?: readonly ContentBlock[] }
       const text = messageText(data.content, 200)
