@@ -1017,5 +1017,61 @@ console.log('28) 空回合中性收尾')
   ok('空回合：占位卡中性提示收尾')
 }
 
+// ── 29. 会话去向透明化（v0.6.8）：/detach、/sessions 如实说明 resume 目标 ──
+console.log('29) /detach 与 /sessions 的映射去向提示')
+{
+  const os = await import('node:os')
+  const path = await import('node:path')
+  const fs = await import('node:fs')
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'feishu-test-'))
+  const oldHome = process.env.DSH_HOME
+  process.env.DSH_HOME = tmp
+  try {
+    const storeDir = path.join(tmp, 'feishu-bot')
+    fs.mkdirSync(storeDir, { recursive: true })
+    const MAPPED = 'feishu-oc_map-daytime-abcdef12'
+    fs.writeFileSync(path.join(storeDir, 'chat-sessions.json'), JSON.stringify({ oc_map: MAPPED }))
+    const guiAgent = makeAgent('session-gui-1', '/mnt/d/DSHProjects')
+    const agents = makeAgentsRegistry([guiAgent])
+    const { send, handler } = await boot(
+      { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false },
+      { agents, agentPresets: { defaultId: 'standard' } },
+    )
+    // 1) /attach 到与映射不同的会话：应提示映射仍指向旧会话
+    await handler({ chatId: 'oc_map', messageId: 'om_1', content: '/attach session-gui-1', senderId: 'ou_1' })
+    await new Promise(r => setTimeout(r, 30))
+    const attachNote = send.map(s => textOf(s.input)).find(t => t.includes('持久映射仍指向'))
+    assert.ok(attachNote, '/attach 差异目标时应有映射提醒')
+    assert.ok(attachNote.includes('feishu-oc_ma…abcdef12'), `映射提醒应含缩写 id（实际：${attachNote}）`)
+    // 2) /detach：应说明下一条消息将恢复映射会话，并给出 /new 指引
+    send.length = 0
+    await handler({ chatId: 'oc_map', messageId: 'om_2', content: '/detach', senderId: 'ou_1' })
+    await new Promise(r => setTimeout(r, 30))
+    const detachReply = textOf(send[send.length - 1].input)
+    assert.ok(detachReply.includes('已解除接手'), '/detach 应回复解除成功')
+    assert.ok(detachReply.includes('将自动恢复会话') && detachReply.includes('/new'), `/detach 应说明去向与 /new 指引（实际：${detachReply}）`)
+    // 3) /sessions：未接手时应显示映射去向行
+    send.length = 0
+    await handler({ chatId: 'oc_map', messageId: 'om_3', content: '/sessions', senderId: 'ou_1' })
+    await new Promise(r => setTimeout(r, 30))
+    const sessionsReply = textOf(send[send.length - 1].input)
+    assert.ok(sessionsReply.includes('未接手 · 下一条消息将自动恢复'), `/sessions 应显示映射去向（实际：${sessionsReply.slice(0, 200)}）`)
+    // 4) 无活跃会话但映射仍在（重启后场景）：/sessions 应给出恢复提示
+    const { send: send2, handler: handler2 } = await boot(
+      { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false },
+      { agents: makeAgentsRegistry(), agentPresets: { defaultId: 'standard' } },
+    )
+    await handler2({ chatId: 'oc_map', messageId: 'om_4', content: '/sessions', senderId: 'ou_1' })
+    await new Promise(r => setTimeout(r, 30))
+    const emptyReply = textOf(send2[send2.length - 1].input)
+    assert.ok(emptyReply.includes('持久映射仍指向') && emptyReply.includes('自动恢复'), `空列表时应提示恢复目标（实际：${emptyReply.slice(0, 200)}）`)
+    ok('/detach、/attach、/sessions 均如实说明下一条消息的去向（恢复映射会话/新建）')
+  } finally {
+    if (oldHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = oldHome
+    fs.rmSync(tmp, { recursive: true, force: true })
+  }
+}
+
 console.log(`\n全部通过（${passed} 项断言组）✅`)
 
