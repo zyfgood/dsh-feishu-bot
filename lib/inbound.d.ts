@@ -11,7 +11,10 @@
  * - 未指定 `agentId`：自动创建专属 DSH agent（首条消息创建、后续复用）；
  * - 指定 `agentId`：复用该会话；
  * - 可用飞书命令管理会话（config.commands，默认开启）：
- *   `/new` `/reset`      清空当前会话上下文（销毁专属 agent，下条消息新建）
+ *   `/new` `/reset`      清空当前会话上下文（销毁专属 agent，下条消息新建；
+ *                        v0.6.9 起回复附新会话参数预览：模型/权限/预设/目录）
+ *   `/model`            查看/切换本飞书会话的模型（v0.7.0；覆盖 > 插件配置
+ *                        > GUI 默认；活跃会话自下一 step 生效；/model reset 恢复）
  *   `/sessions`          列出当前活跃的 DSH agent 会话
  *   `/attach <会话id>`   接手 GUI 中某个既有会话（此后该飞书会话驱动它）
  *   `/detach`            解除接手，回到自动创建模式
@@ -20,11 +23,11 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type { MarkdownStreamController, SendResult } from '@larksuiteoapi/node-sdk';
-import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent';
+import { type Agent, type AgentHandle } from '@deepseek-ai/dsh-agent';
 import type { FeishuService } from './service.ts';
 import type { Config } from './index.ts';
 import { type PendingQuestionState } from './questions.ts';
-import type { ChatSessionStore } from './persistence.ts';
+import type { ChatSessionStore, ModelOverrideStore } from './persistence.ts';
 /** 一个进行中的流式转发会话（按 agentId 索引）。 */
 interface ChatStream {
     /** 归属的飞书 chat_id。 */
@@ -108,9 +111,27 @@ export interface InboundShared {
     questions: PendingQuestionState;
     /** chat_id → session_id 持久化映射（重启后 resume）。 */
     store?: ChatSessionStore;
+    /** chat_id → /model 设置的模型选择（重启后仍生效）。 */
+    modelStore?: ModelOverrideStore;
 }
 /** 从自动创建的 agent id（feishu-<chatId>-<rand8>）反推 chat_id。 */
 export declare function chatIdFromAgentId(id: string): string | undefined;
+/**
+ * 解析自动创建 agent 时将使用的 provider/model（单一事实来源，/new 提示、
+ * /model 状态与实际创建走同一逻辑）：
+ * 1. `/model` 命令为本飞书会话设置的覆盖（modelStore，最高优先级）；
+ * 2. 插件配置的 `provider`/`model`（cordis.patch.yml）；
+ * 3. 缺失项回退 `ctx.agentDefaultModel.currentSelection()`（GUI 默认模型，
+ *    settings.yaml 的 agent-default-model 分节，热更新生效）。
+ *
+ * @returns 解析结果；source 标记模型来自 /model 覆盖、插件配置还是 GUI
+ *          默认（混合取值时归为 default），全部缺失时返回 undefined。
+ */
+export declare function resolveAgentModel(ctx: Context, config: Config, chatId?: string, shared?: InboundShared): {
+    provider: string;
+    model: string;
+    source: 'override' | 'config' | 'default';
+} | undefined;
 /**
  * 订阅飞书长连接事件，按 config.mode 路由每条入站消息。
  * 每个会话内的消息串行处理，避免并发回复交错。

@@ -22,4 +22,23 @@ export declare class ChatSessionStore {
     delete(chatId: string): void;
     private save;
 }
+/** /model 命令设置的模型选择（chat_id 维度，跨重启保留）。 */
+export interface StoredModelSelection {
+    provider: string;
+    model: string;
+}
+/** chat_id → 模型选择 的持久化映射（/model 命令写入，原子替换落盘）。 */
+export declare class ModelOverrideStore {
+    private readonly path;
+    private data;
+    private constructor();
+    /** 模型覆盖文件默认位置：$DSH_HOME/feishu-bot/model-overrides.json。 */
+    static defaultPath(): string;
+    /** 加载（文件不存在/损坏则视为空映射）。 */
+    static load(path?: string): ModelOverrideStore;
+    get(chatId: string): StoredModelSelection | undefined;
+    set(chatId: string, selection: StoredModelSelection): void;
+    delete(chatId: string): boolean;
+    private save;
+}
 //# sourceMappingURL=persistence.d.ts.map

@@ -1073,5 +1073,223 @@ console.log('29) /detach 与 /sessions 的映射去向提示')
   }
 }
 
+// ── 30. /new 参数预览（v0.6.9）：模型/权限/预设/目录一目了然 ─────
+console.log('30) /new 参数预览')
+{
+  const fakePresets = {
+    defaultId: 'standard',
+    resolve: async (id) => ({ id: id ?? 'standard' }),
+    mount: async () => {},
+  }
+  const fakePermission = {
+    defaultPreset: 'danger-full-access',
+    resolve: (name) => ({ sandbox: 'danger-full-access', approval: 'never' }),
+  }
+  // 30a: 插件配置了 provider/model → 标注「插件配置」
+  {
+    const agents = makeAgentsRegistry()
+    const { send, handler } = await boot(
+      { appId: 'cli_x', appSecret: 's', mode: 'agent', provider: 'deepseek-official', model: 'deepseek-v4-flash', workspace: '/mnt/d/DSHProjects', tools: false, persistSessions: false },
+      { agents, agentPresets: fakePresets, permissionPresets: fakePermission },
+    )
+    await handler({ chatId: 'oc_30a', messageId: 'om_1', content: '/new', senderId: 'ou_1' })
+    await new Promise(r => setTimeout(r, 30))
+    const text = textOf(send[send.length - 1].input)
+    assert.ok(text.includes('新会话参数预览'), `应含参数预览（实际：${text}）`)
+    assert.ok(text.includes('模型：deepseek-official / deepseek-v4-flash（插件配置）'), '应显示插件配置的模型')
+    assert.ok(text.includes('权限：danger-full-access（sandbox=danger-full-access，approval=never）'), '应显示权限预设及 sandbox/approval')
+    assert.ok(text.includes('预设：standard（GUI 默认预设）'), '应显示 agent 预设')
+    assert.ok(text.includes('目录：/mnt/d/DSHProjects'), '应显示工作目录')
+    ok('插件配置模型 → /new 预览含模型/权限/预设/目录')
+  }
+  // 30b: 未配置 provider/model → 回退 agentDefaultModel 并标注「跟随 GUI 默认模型」
+  {
+    const agents = makeAgentsRegistry()
+    const { send, handler } = await boot(
+      { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false, persistSessions: false },
+      {
+        agents,
+        agentPresets: fakePresets,
+        permissionPresets: fakePermission,
+        agentDefaultModel: { currentSelection: () => ({ provider: 'zai-coding-cn', model: 'glm-5.3' }) },
+      },
+    )
+    await handler({ chatId: 'oc_30b', messageId: 'om_2', content: '/new', senderId: 'ou_1' })
+    await new Promise(r => setTimeout(r, 30))
+    const text = textOf(send[send.length - 1].input)
+    assert.ok(text.includes('模型：zai-coding-cn / glm-5.3（跟随 GUI 默认模型）'), `应显示默认模型回退（实际：${text}）`)
+    ok('未配置模型 → 预览回退 GUI 默认模型并标注来源')
+  }
+  // 30c: llm 模式 /new 不附参数预览（agent 参数无意义）
+  {
+    const agents = makeAgentsRegistry()
+    const { send, handler } = await boot(
+      { appId: 'cli_x', appSecret: 's', mode: 'llm', tools: false, persistSessions: false },
+      { agents, agentPresets: fakePresets, permissionPresets: fakePermission },
+    )
+    await handler({ chatId: 'oc_30c', messageId: 'om_3', content: '/new', senderId: 'ou_1' })
+    await new Promise(r => setTimeout(r, 30))
+    const text = textOf(send[send.length - 1].input)
+    assert.ok(!text.includes('新会话参数预览'), 'llm 模式不应附 agent 参数预览')
+    ok('llm 模式 /new 不附参数预览')
+  }
+}
+
+// ── 31. /model 命令（v0.7.0）：查看/切换/重置/唯一匹配/持久化 ────
+console.log('31) /model 查看与切换')
+{
+  const os = await import('node:os')
+  const path = await import('node:path')
+  const fs = await import('node:fs')
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'feishu-test-'))
+  const oldHome = process.env.DSH_HOME
+  process.env.DSH_HOME = tmp
+  try {
+    const fakeLlmDir = {
+      listProviders: () => [
+        { id: 'deepseek-official', name: 'DeepSeek 官方' },
+        { id: 'zai-coding-cn', name: '智谱' },
+      ],
+      listModels: async (p) => p === 'deepseek-official'
+        ? [{ id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash' }, { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro' }, { id: 'dupe-model', name: 'Dupe' }]
+        : p === 'zai-coding-cn'
+          ? [{ id: 'glm-5.3', name: 'GLM-5.3' }, { id: 'dupe-model', name: 'Dupe' }]
+          : [],
+      resolveCallConfig: async (c) => ({ provider: c.provider, model: c.model }),
+    }
+    // agent setup 的 mock 上下文带 on()：让 installModelSelection 真正装上，
+    // 捕获瀑布监听以验证活会话热切换。
+    const agents = makeAgentsRegistry()
+    const waterfalls = {}
+    const realCreate = agents.create
+    agents.create = async (opts) => {
+      if (opts.setup) {
+        const original = opts.setup
+        opts.setup = async (agentCtx) => {
+          const withOn = {
+            ...agentCtx,
+            on: (name, fn) => { (waterfalls[name] ??= []).push(fn); return () => {} },
+          }
+          await original(withOn)
+        }
+      }
+      return realCreate(opts)
+    }
+    const { send, handler } = await boot(
+      { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false, persistSessions: false },
+      {
+        agents,
+        agentPresets: { defaultId: 'standard', resolve: async (id) => ({ id: id ?? 'standard' }), mount: async () => {} },
+        llm: fakeLlmDir,
+        agentDefaultModel: { currentSelection: () => ({ provider: 'zai-coding-cn', model: 'glm-5.3' }) },
+      },
+    )
+    // 31a: 状态视图 —— 无覆盖时跟随 GUI 默认
+    await handler({ chatId: 'oc_31', messageId: 'om_1', content: '/model', senderId: 'ou_1' })
+    await new Promise(r => setTimeout(r, 30))
+    let text = textOf(send[send.length - 1].input)
+    assert.ok(text.includes('当前模型：zai-coding-cn / glm-5.3（GUI 默认模型）'), `应显示 GUI 默认模型（实际：${text}）`)
+    ok('/model 状态视图显示 GUI 默认模型')
+
+    // 31b: 精确切换 → 覆盖生效并落盘
+    await handler({ chatId: 'oc_31', messageId: 'om_2', content: '/model deepseek-official/deepseek-v4-pro', senderId: 'ou_1' })
+    await new Promise(r => setTimeout(r, 30))
+    text = textOf(send[send.length - 1].input)
+    assert.ok(text.includes('已切换为 deepseek-official / deepseek-v4-pro'), `切换应成功（实际：${text}）`)
+    const stored = JSON.parse(fs.readFileSync(path.join(tmp, 'feishu-bot', 'model-overrides.json'), 'utf8'))
+    assert.equal(stored.oc_31?.model, 'deepseek-v4-pro', '覆盖应持久化到 model-overrides.json')
+    // 状态视图反映覆盖
+    await handler({ chatId: 'oc_31', messageId: 'om_3', content: '/model', senderId: 'ou_1' })
+    await new Promise(r => setTimeout(r, 30))
+    text = textOf(send[send.length - 1].input)
+    assert.ok(text.includes('deepseek-v4-pro（/model 设置）'), `状态应标注 /model 设置（实际：${text}）`)
+    ok('/model <provider>/<model> 切换 + 持久化 + 状态反映')
+
+    // 31c: 活会话热切换 —— 先建会话（此时覆盖已生效于 agentOptions），
+    // 再切新模型，瀑布监听应实时返回新模型（无需重建会话）。
+    await handler({ chatId: 'oc_31', messageId: 'om_4', content: '你好', senderId: 'ou_1' })
+    await new Promise(r => setTimeout(r, 30))
+    assert.equal(agents.roots()[0].options.model, 'deepseek-v4-pro', '新建会话应采用覆盖模型')
+    await handler({ chatId: 'oc_31', messageId: 'om_5', content: '/model deepseek-official/deepseek-v4-flash', senderId: 'ou_1' })
+    await new Promise(r => setTimeout(r, 30))
+    const assemble = waterfalls['system-prompt/assemble']?.[waterfalls['system-prompt/assemble'].length - 1]
+    assert.ok(assemble, 'setup 应已安装模型选择瀑布监听')
+    const out = await assemble({}, {}, async () => ({ variables: { provider: 'old', model: 'old' } }))
+    assert.equal(out.variables.model, 'deepseek-v4-flash', `活会话下一步应热切换到新模型（实际：${JSON.stringify(out.variables)}）`)
+    ok('活会话热切换：installModelSelection 每步读取最新覆盖')
+
+    // 31d: 唯一匹配（只给模型 id）
+    await handler({ chatId: 'oc_31', messageId: 'om_6', content: '/model glm-5.3', senderId: 'ou_1' })
+    await new Promise(r => setTimeout(r, 30))
+    text = textOf(send[send.length - 1].input)
+    assert.ok(text.includes('已切换为 zai-coding-cn / glm-5.3'), `唯一匹配应解析 provider（实际：${text}）`)
+    ok('/model <模型id> 跨 provider 唯一匹配')
+
+    // 31e: 歧义模型 → 列出候选
+    await handler({ chatId: 'oc_31', messageId: 'om_7', content: '/model dupe-model', senderId: 'ou_1' })
+    await new Promise(r => setTimeout(r, 30))
+    text = textOf(send[send.length - 1].input)
+    assert.ok(text.includes('多个 provider') && text.includes('deepseek-official / dupe-model') && text.includes('zai-coding-cn / dupe-model'), `歧义应列候选（实际：${text}）`)
+    ok('歧义模型 id 列出完整候选')
+
+    // 31f: reset → 恢复默认
+    await handler({ chatId: 'oc_31', messageId: 'om_8', content: '/model reset', senderId: 'ou_1' })
+    await new Promise(r => setTimeout(r, 30))
+    text = textOf(send[send.length - 1].input)
+    assert.ok(text.includes('已清除'), 'reset 应成功')
+    const stored2 = JSON.parse(fs.readFileSync(path.join(tmp, 'feishu-bot', 'model-overrides.json'), 'utf8'))
+    assert.equal(stored2.oc_31, undefined, 'reset 应清除持久化覆盖')
+    ok('/model reset 清除覆盖（含落盘）')
+
+    // 31g: 未知模型 → 明确报错
+    await handler({ chatId: 'oc_31', messageId: 'om_9', content: '/model no-such-model', senderId: 'ou_1' })
+    await new Promise(r => setTimeout(r, 30))
+    text = textOf(send[send.length - 1].input)
+    assert.ok(text.includes('未找到模型'), `未知模型应提示（实际：${text}）`)
+    ok('未知模型给出明确提示')
+
+    // 31h: list → 列出 provider 与模型
+    await handler({ chatId: 'oc_31', messageId: 'om_10', content: '/model list', senderId: 'ou_1' })
+    await new Promise(r => setTimeout(r, 30))
+    text = textOf(send[send.length - 1].input)
+    assert.ok(text.includes('【deepseek-official】') && text.includes('deepseek-v4-flash') && text.includes('【zai-coding-cn】'), `list 应列出模型（实际：${text.slice(0, 120)}）`)
+    ok('/model list 列出可用模型')
+  } finally {
+    if (oldHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = oldHome
+    fs.rmSync(tmp, { recursive: true, force: true })
+  }
+}
+
+// ── 32. /model 对接手会话的限制（GUI 会话在 GUI 侧切换）────────
+console.log('32) /model 限制：接手/配置会话')
+{
+  const gui = makeAgent('session-gui-999', '/mnt/d/DSHProjects/projA', 'deepseek-v4-pro')
+  const agents = makeAgentsRegistry([gui])
+  const { send, handler } = await boot(
+    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false, persistSessions: false },
+    {
+      agents,
+      agentPresets: { defaultId: 'standard', resolve: async (id) => ({ id: id ?? 'standard' }), mount: async () => {} },
+      llm: { listProviders: () => [{ id: 'p' }], listModels: async () => [{ id: 'm' }], resolveCallConfig: async (c) => c },
+    },
+  )
+  await handler({ chatId: 'oc_32', messageId: 'om_1', content: '/attach session-gui-999', senderId: 'ou_1' })
+  await new Promise(r => setTimeout(r, 30))
+  await handler({ chatId: 'oc_32', messageId: 'om_2', content: '/model p/m', senderId: 'ou_1' })
+  await new Promise(r => setTimeout(r, 30))
+  const text = textOf(send[send.length - 1].input)
+  assert.ok(text.includes('GUI'), `接手会话应提示去 GUI 切换（实际：${text}）`)
+  // llm 模式提示
+  const { send: send2, handler: handler2 } = await boot(
+    { appId: 'cli_x', appSecret: 's', mode: 'llm', tools: false, persistSessions: false },
+    { agents: makeAgentsRegistry() },
+  )
+  await handler2({ chatId: 'oc_32b', messageId: 'om_3', content: '/model', senderId: 'ou_1' })
+  await new Promise(r => setTimeout(r, 30))
+  assert.ok(textOf(send2[send2.length - 1].input).includes('agent 模式'), 'llm 模式应提示不适用')
+  ok('接手会话与 llm 模式给出明确限制提示')
+}
+
 console.log(`\n全部通过（${passed} 项断言组）✅`)
 

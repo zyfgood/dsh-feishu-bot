@@ -33,7 +33,7 @@ import { FeishuService, type FeishuPolicyConfig } from './service.ts'
 import { attachInbound, type InboundShared } from './inbound.ts'
 import { registerFeishuTools } from './tools.ts'
 import { PendingQuestionState } from './questions.ts'
-import { ChatSessionStore } from './persistence.ts'
+import { ChatSessionStore, ModelOverrideStore } from './persistence.ts'
 
 export const name = 'feishu-bot'
 
@@ -230,12 +230,14 @@ export function apply(ctx: Context, config: Config): void {
   // 共享状态：会话绑定 / 流式转发 / 飞书侧确认问答 / 持久化映射。
   const questions = new PendingQuestionState(ctx, service, config.questionTimeoutMs ?? 600_000)
   const store = config.persistSessions === false ? undefined : ChatSessionStore.load()
+  // /model 覆盖独立于会话映射持久化（不受 persistSessions 开关影响）。
   const shared: InboundShared = {
     stateByChat: new Map(),
     relays: new Map(),
     chatByAgent: new Map(),
     questions,
     store,
+    modelStore: ModelOverrideStore.load(),
   }
   attachInbound(ctx, service, config, shared)
 

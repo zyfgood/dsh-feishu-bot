@@ -35,9 +35,11 @@ public callback URL needed (official WebSocket long connection, auto-reconnect).
 - **Ask while a task is running**: messages sent mid-task are injected via
   `steer` at the next step boundary — the agent answers first (streamed), then
   continues the task.
-- **Session commands**: `/new` (fresh context), `/sessions` (list sessions),
-  `/attach` (take over an existing GUI session — both sides share context),
-  `/detach`.
+- **Session commands**: `/new` (fresh context, reply previews the next
+  session's model/permission/preset/workspace), `/model` (view or switch this
+  chat's model — effective from the next step on the live session, persisted
+  per chat), `/sessions` (list sessions), `/attach` (take over an existing GUI
+  session — both sides share context), `/detach`.
 - **Outbound (agent → Feishu)**: six model-callable tools
   (`feishu_send_message`, `feishu_reply_message`, `feishu_list_chats`,
   `feishu_get_messages`, `feishu_get_chat_info`, `feishu_connection_status`).
@@ -201,8 +203,8 @@ dsh --profile web
 | `mode` | `echo` \| `llm` \| `agent` | `llm` | 入站回复模式 |
 | `replyFormat` | `markdown` \| `text` | `markdown` | 回复排版：markdown 富文本（代码块/表格/列表完整渲染，agent 流式以卡片呈现）或纯文本 |
 | `systemPrompt` | string | 默认提示词 | `llm` 模式的系统提示词 |
-| `provider` | string | — | `llm` 模式的 provider 路由（如 `deepseek-official`） |
-| `model` | string | — | `llm` 模式的模型 id（如 `deepseek-v4-flash`） |
+| `provider` | string | — | provider 路由（如 `deepseek-official`）。`llm` 模式直接使用；`agent` 模式自动创建会话时优先使用 |
+| `model` | string | — | 模型 id（如 `deepseek-v4-flash`）。`llm` 模式直接使用；`agent` 模式自动创建会话时优先使用 |
 | `maxHistory` | number | `20` | `llm` 模式每会话保留的对话轮数（0 = 无记忆） |
 | `agentId` | string | — | `agent` 模式：目标 DSH agent 会话 id（不配置则自动创建） |
 | `agentPreset` | string | 跟随默认 | 自动创建会话使用的 agent preset（如 `standard` / `liangshen`）；不配置跟随 GUI 默认预设 |
@@ -217,6 +219,29 @@ dsh --profile web
 | `streamPlaceholder` | string | `收到，正在处理…` | 占位卡片文案（配合 `eagerPlaceholder`） |
 | `tools` | boolean | `true` | 是否注册 `feishu_*` 模型工具 |
 | `pushChatId` | string | — | 飞书目标群 chat_id（`oc_` 开头）；配置后启用 `feishu_push` 工具（任务结果/定时推送直达该群） |
+
+### 3.1 新会话的模型与权限如何确定（agent 模式）
+
+`/new` 后下一条消息自动新建会话时，模型按以下顺序解析（`resolveAgentModel`）：
+
+1. **`/model` 命令设置的覆盖**（本飞书会话维度，存于
+   `$DSH_HOME/feishu-bot/model-overrides.json`，重启后仍生效，最高优先级）；
+2. **插件配置** `provider` + `model`（cordis.patch.yml）；
+3. 缺失时回退 **GUI 默认模型** `ctx.agentDefaultModel`（settings.yaml 的
+   `agent-default-model` 分节，即 GUI 选择的默认模型，热更新生效）。
+
+`/model <provider>/<模型id>` 切换的是第 1 层覆盖：经 `ctx.llm` 校验模型可用
+后写入，对**活跃会话从下一个 step 生效**（与 GUI 切模型同一机制：
+`installModelSelection` 每 step 实时读取，运行中任务当前 step 不受影响），
+之后新建/恢复的会话也沿用；`/model reset` 清除覆盖回到第 2/3 层。
+`/attach` 接手或 `agentId` 配置的 GUI 会话不适用（模型在 GUI 会话内切换）。
+
+权限与预设跟随 DSH 全局设置，插件不单独覆盖：权限预设取
+`ctx.permissionPresets` 默认值（settings.yaml `permission.defaultPreset`，
+如 `danger-full-access` = sandbox 全开 + 免审批），agent 预设取
+`agentPreset` 配置或 GUI 默认预设。
+
+`/new` 的回复（v0.6.9 起）会附上这些参数的预览，无需翻配置即可确认。
 
 ## 四、互动方式
 
@@ -283,7 +308,8 @@ agent 在飞书会话里调用 `ask_user_question`（需要你确认/选择）�
 
 | 命令 | 作用 |
 |---|---|
-| `/new` 或 `/reset` | **开始新会话**：销毁当前飞书会话的专属 agent，下一条消息自动新建（上下文清空） |
+| `/new` 或 `/reset` | **开始新会话**：销毁当前飞书会话的专属 agent，下一条消息自动新建（上下文清空）；v0.6.9 起回复附带**新会话参数预览**（模型及来源、权限预设 sandbox/approval、agent 预设、工作目录） |
+| `/model` | **查看/切换本飞书会话的模型**（v0.7.0）：`/model` 看状态 · `/model list` 列可用模型 · `/model <provider>/<模型id>` 精确切换 · `/model <模型id>` 唯一匹配（歧义时列候选） · `/model reset` 恢复默认。切换对活跃会话自下一个 step 生效（运行中任务不撕裂），并持久化跨重启（`model-overrides.json`）；仅影响本飞书会话 |
 | `/sessions` | 列出当前活跃的 DSH agent 会话（编号 + 标题 + 模型 + 工作目录） |
 | `/attach <编号或会话id>` | **接手 GUI 中某个既有会话**：此后该飞书会话直接驱动它（两边共享上下文，GUI 可见） |
 | `/detach` | 解除接手（v0.6.8 起回复会如实说明下一条消息的去向：有持久映射→自动恢复映射会话并附 `/new` 指引；无映射→自动新建） |

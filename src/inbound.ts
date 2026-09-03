@@ -11,7 +11,10 @@
  * - 未指定 `agentId`：自动创建专属 DSH agent（首条消息创建、后续复用）；
  * - 指定 `agentId`：复用该会话；
  * - 可用飞书命令管理会话（config.commands，默认开启）：
- *   `/new` `/reset`      清空当前会话上下文（销毁专属 agent，下条消息新建）
+ *   `/new` `/reset`      清空当前会话上下文（销毁专属 agent，下条消息新建；
+ *                        v0.6.9 起回复附新会话参数预览：模型/权限/预设/目录）
+ *   `/model`            查看/切换本飞书会话的模型（v0.7.0；覆盖 > 插件配置
+ *                        > GUI 默认；活跃会话自下一 step 生效；/model reset 恢复）
  *   `/sessions`          列出当前活跃的 DSH agent 会话
  *   `/attach <会话id>`   接手 GUI 中某个既有会话（此后该飞书会话驱动它）
  *   `/detach`            解除接手，回到自动创建模式
@@ -34,14 +37,20 @@ import {
   type Message,
 } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
-import type { AgentRegistry, Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
+import {
+  installModelSelection,
+  type AgentRegistry,
+  type Agent,
+  type AgentHandle,
+  type ModelSelectionRef,
+} from '@deepseek-ai/dsh-agent'
 import type { FeishuService } from './service.ts'
 import type { Config } from './index.ts'
 import {
   defineFeishuAskTool,
   type PendingQuestionState,
 } from './questions.ts'
-import type { ChatSessionStore } from './persistence.ts'
+import type { ChatSessionStore, ModelOverrideStore } from './persistence.ts'
 
 /** 流式转发到飞书的节流间隔（ms）：飞书消息编辑有限频，聚合后批量更新。 */
 const STREAM_FLUSH_MS = 400
@@ -209,6 +218,8 @@ export interface InboundShared {
   questions: PendingQuestionState
   /** chat_id → session_id 持久化映射（重启后 resume）。 */
   store?: ChatSessionStore
+  /** chat_id → /model 设置的模型选择（重启后仍生效）。 */
+  modelStore?: ModelOverrideStore
 }
 
 /** 从自动创建的 agent id（feishu-<chatId>-<rand8>）反推 chat_id。 */
@@ -802,6 +813,28 @@ function buildAgentSetup(
         ctx.logger.error(`feishu: preset "${requested}" 挂载失败，该 agent 将使用全局工具运行`, error)
       }
     }
+    // 模型选择（v0.7.0）：与 GUI 同机制的 installModelSelection——每个
+    // step 实时读取 current（getter 现算 /model 覆盖 > 插件配置 > GUI
+    // 默认），因此 /model 切换对本会话从下一个 step 生效，无需重建会话；
+    // 运行中的当前 step 保持旧模型（assembled 快照），不会撕裂请求。
+    try {
+      const scoped = agentCtx as Context & { agent?: Agent }
+      if (scoped.agent) {
+        const agentChatId = chatIdFor(scoped.agent.id)
+        const selection: ModelSelectionRef = {
+          get current() {
+            const resolved = agentChatId === undefined
+              ? undefined
+              : resolveAgentModel(ctx, config, agentChatId, shared)
+            return resolved === undefined ? undefined : { provider: resolved.provider, model: resolved.model }
+          },
+          assembled: undefined,
+        }
+        installModelSelection(scoped, selection)
+      }
+    } catch (error) {
+      ctx.logger.warn('feishu: 安装模型选择失败，/model 切换将只影响之后新建的会话', error)
+    }
     // 飞书版 ask_user_question：agent 级 shadowing 覆盖全局 GUI 版，
     // 问题以交互卡片发到飞书，避免「问题只在 Web 界面、飞书侧永久挂起」。
     try {
@@ -815,6 +848,89 @@ function buildAgentSetup(
       ctx.logger.warn('feishu: 注册飞书版 ask_user_question 失败，将使用全局 GUI 版（飞书侧确认可能不可用）', error)
     }
   }
+}
+
+/**
+ * 解析自动创建 agent 时将使用的 provider/model（单一事实来源，/new 提示、
+ * /model 状态与实际创建走同一逻辑）：
+ * 1. `/model` 命令为本飞书会话设置的覆盖（modelStore，最高优先级）；
+ * 2. 插件配置的 `provider`/`model`（cordis.patch.yml）；
+ * 3. 缺失项回退 `ctx.agentDefaultModel.currentSelection()`（GUI 默认模型，
+ *    settings.yaml 的 agent-default-model 分节，热更新生效）。
+ *
+ * @returns 解析结果；source 标记模型来自 /model 覆盖、插件配置还是 GUI
+ *          默认（混合取值时归为 default），全部缺失时返回 undefined。
+ */
+export function resolveAgentModel(
+  ctx: Context,
+  config: Config,
+  chatId?: string,
+  shared?: InboundShared,
+): { provider: string; model: string; source: 'override' | 'config' | 'default' } | undefined {
+  // 1) /model 覆盖（chat 维度）
+  if (chatId && shared?.modelStore) {
+    const override = shared.modelStore.get(chatId)
+    if (override) return { ...override, source: 'override' }
+  }
+  let provider = config.provider
+  let model = config.model
+  let usedDefault = false
+  // agent 必须带 provider/model：agent-loop 不自动兜底，缺失会导致
+  // 提示词组装时 {{model}} 无值、agent 无法工作。配置未指定时读取
+  // ctx.agentDefaultModel 的默认选择（base bundle 提供 deepseek-official）。
+  if (!provider || !model) {
+    usedDefault = true
+    const defaultModel = ctx.get('agentDefaultModel') as
+      | { currentSelection(): { provider: string; model: string } }
+      | undefined
+    if (defaultModel) {
+      const selection = defaultModel.currentSelection()
+      provider ??= selection.provider
+      model ??= selection.model
+    }
+  }
+  if (!provider || !model) return undefined
+  return { provider, model, source: usedDefault ? 'default' : 'config' }
+}
+
+/**
+ * 组装「下一条消息自动新建会话」的参数说明（模型 / 权限预设 / agent
+ * 预设 / 工作目录），用于 /new 等回复中，方便用户确认新会话将以什么
+ * 配置运行。任一项服务缺失时跳过该项，不阻断回复。
+ */
+async function describeNextSession(ctx: Context, config: Config, shared: InboundShared, chatId: string): Promise<string> {
+  const lines: string[] = []
+  // 模型：与 resolveAgent 实际创建逻辑一致（resolveAgentModel）。
+  const selection = resolveAgentModel(ctx, config, chatId, shared)
+  const sourceLabel = selection?.source === 'override' ? '/model 设置' : selection?.source === 'config' ? '插件配置' : '跟随 GUI 默认模型'
+  lines.push(selection
+    ? `• 模型：${selection.provider} / ${selection.model}（${sourceLabel}）`
+    : '• 模型：⚠️ 未解析到（未配置且无默认模型服务，可用 /model <provider>/<model> 指定）')
+  // 权限预设：sandbox + approval 组合，来自 ctx.permissionPresets 默认值。
+  const permissionPresets = ctx.get('permissionPresets') as
+    | { defaultPreset: string; resolve(name: string): { sandbox?: string; approval?: string } }
+    | undefined
+  if (permissionPresets) {
+    try {
+      const name = permissionPresets.defaultPreset
+      const spec = permissionPresets.resolve(name)
+      lines.push(`• 权限：${name}（sandbox=${spec.sandbox ?? '?'}，approval=${spec.approval ?? '?'}）`)
+    } catch {
+      lines.push(`• 权限：${permissionPresets.defaultPreset}`)
+    }
+  }
+  // agent 预设：决定新会话挂载哪些工具/技能。
+  const agentPresets = ctx.get('agentPresets') as
+    | { defaultId?: string; resolve(id?: string): Promise<{ id: string }> }
+    | undefined
+  if (agentPresets) {
+    try {
+      const resolved = await agentPresets.resolve(config.agentPreset ?? agentPresets.defaultId)
+      lines.push(`• 预设：${resolved.id}${config.agentPreset ? '（插件配置）' : '（GUI 默认预设）'}`)
+    } catch { /* 解析失败跳过 */ }
+  }
+  lines.push(`• 目录：${config.workspace ?? process.cwd()}`)
+  return `\n\n📋 新会话参数预览：\n${lines.join('\n')}`
 }
 
 /** 解析目标 agent：attach 绑定 > 配置 agentId > 自动创建/恢复/复用。 */
@@ -857,22 +973,11 @@ async function resolveAgent(
   }
   if (state?.auto) state.auto = undefined
 
-  // agent 必须带 provider/model：agent-loop 不自动兜底，缺失会导致
-  // 提示词组装时 {{model}} 无值、agent 无法工作。配置未指定时读取
-  // ctx.agentDefaultModel 的默认选择（base bundle 提供 deepseek-official）。
-  let provider = config.provider
-  let model = config.model
-  if (!provider || !model) {
-    const defaultModel = ctx.get('agentDefaultModel') as
-      | { currentSelection(): { provider: string; model: string } }
-      | undefined
-    if (defaultModel) {
-      const selection = defaultModel.currentSelection()
-      provider ??= selection.provider
-      model ??= selection.model
-    }
-  }
-  const agentOptions = provider && model ? { provider, model } : undefined
+  // 模型解析见 resolveAgentModel（/model 覆盖 > 配置 > GUI 默认模型）。
+  const selection = resolveAgentModel(ctx, config, chatId, shared)
+  const provider = selection?.provider
+  const model = selection?.model
+  const agentOptions = selection ? { provider: selection.provider, model: selection.model } : undefined
   const setup = buildAgentSetup(ctx, config, shared)
 
   // 3.5) 持久化映射：重启/插件重载后恢复同一 DSH 会话，延续上下文
@@ -1034,6 +1139,180 @@ async function trySteerRunning(
   return true
 }
 
+/** /model 需要的 ctx.llm 目录/校验能力（结构性子集，便于测试替身）。 */
+interface ModelDirectoryLlm {
+  listProviders(): Array<{ id: string; name?: string }>
+  listModels(provider: string): Promise<Array<{ id: string; name?: string }>>
+  resolveCallConfig(config: { provider: string; model: string }): Promise<{ provider: string; model: string }>
+}
+
+/**
+ * /model 命令处理（v0.7.0，agent 模式）：
+ * - `/model`            查看当前模型状态（覆盖/来源/活跃会话）
+ * - `/model list`       列出可用 provider 与模型
+ * - `/model reset`      清除本会话覆盖，恢复跟随默认
+ * - `/model <p>/<m>`    精确指定 provider 与模型（经 llm 校验）
+ * - `/model <m>`        只给模型 id：跨 provider 唯一匹配，歧义时列候选
+ *
+ * 覆盖按 chat_id 维度持久化（model-overrides.json），只影响本飞书会话：
+ * 活跃会话经 installModelSelection 从下一个 step 生效；新建/恢复会话在
+ * 创建时采用。接手（/attach）或配置 agentId 的 GUI 会话不适用（模型在
+ * GUI 侧切换）。
+ */
+async function handleModelCommand(
+  ctx: Context,
+  service: FeishuService,
+  config: Config,
+  shared: InboundShared,
+  msg: NormalizedMessage,
+  t: string,
+): Promise<void> {
+  if ((config.mode ?? 'llm') !== 'agent') {
+    await safeReply(ctx, service, msg, '（/model 仅在 agent 模式可用；llm 模式请在插件配置中指定 provider/model。）')
+    return
+  }
+  const state = shared.stateByChat.get(msg.chatId)
+  const arg = t === '/model' ? '' : t.slice('/model '.length).trim()
+
+  // ── 状态视图 ──────────────────────────────────────────────
+  if (!arg) {
+    const selection = resolveAgentModel(ctx, config, msg.chatId, shared)
+    const label = selection?.source === 'override' ? '/model 设置' : selection?.source === 'config' ? '插件配置' : 'GUI 默认模型'
+    const lines: string[] = []
+    if (state?.bound) {
+      lines.push(`📎 当前接手 GUI 会话 ${shortSessionId(state.bound.id)}：模型请在 GUI 会话内切换，或 /detach 后再用 /model。`)
+    } else if (config.agentId) {
+      lines.push(`📎 当前使用配置的会话 ${config.agentId}：模型请在 GUI 会话内切换。`)
+    }
+    lines.push(selection
+      ? `🤖 当前模型：${selection.provider} / ${selection.model}（${label}）`
+      : '🤖 当前模型：未解析到（无 /model 覆盖、无插件配置、无默认模型服务；用 /model <provider>/<model> 指定）')
+    if (state?.auto?.agent) {
+      lines.push(`💬 活跃会话：${shortSessionId(state.auto.agent.id)}${state.auto.agent.status === 'running' ? '（任务运行中，切换从下一 step 生效）' : ''}`)
+    }
+    lines.push('')
+    lines.push('用法：/model <provider>/<model> 切换 · /model <模型id> 唯一匹配 · /model list 列表 · /model reset 恢复默认')
+    lines.push('切换仅对本飞书会话生效（含之后新建的会话），不影响 GUI 其他会话。')
+    await safeReply(ctx, service, msg, lines.join('\n'))
+    return
+  }
+
+  // ── 重置覆盖 ──────────────────────────────────────────────
+  if (arg === 'reset' || arg === 'default' || arg === 'clear') {
+    const removed = shared.modelStore?.delete(msg.chatId) ?? false
+    await safeReply(ctx, service, msg, removed
+      ? '✅ 已清除本会话的模型覆盖，恢复跟随默认（插件配置或 GUI 默认模型）。'
+      : '（本会话没有 /model 覆盖，当前即默认选择。）')
+    return
+  }
+
+  // ── 模型列表 ──────────────────────────────────────────────
+  if (arg === 'list' || arg === 'ls') {
+    const llm = ctx.get('llm') as ModelDirectoryLlm | undefined
+    if (!llm || typeof llm.listProviders !== 'function') {
+      await safeReply(ctx, service, msg, '（当前环境未加载 ctx.llm，无法列出模型；可直接 /model <provider>/<model> 尝试指定。）')
+      return
+    }
+    const selection = resolveAgentModel(ctx, config, msg.chatId, shared)
+    const lines: string[] = ['可用模型：']
+    let truncated = false
+    try {
+      for (const provider of llm.listProviders()) {
+        if (lines.length > 40) { truncated = true; break }
+        let models: Array<{ id: string; name?: string }> = []
+        try {
+          models = await llm.listModels(provider.id)
+        } catch { /* 单个 provider 拉取失败跳过 */ }
+        lines.push(`【${provider.id}】${provider.name ?? ''}`)
+        const shown = models.slice(0, 15)
+        for (const m of shown) {
+          const mark = selection && selection.provider === provider.id && selection.model === m.id ? ' ← 当前' : ''
+          lines.push(`  • ${m.id}${m.name && m.name !== m.id ? `（${m.name}）` : ''}${mark}`)
+        }
+        if (models.length > shown.length) lines.push(`  …共 ${models.length} 个（略）`)
+        if (models.length === 0) lines.push('  （无已注册模型）')
+      }
+    } catch (error) {
+      ctx.logger.warn('feishu: /model list 枚举失败', error)
+    }
+    if (truncated) lines.push('…（列表过长已截断）')
+    lines.push('')
+    lines.push('切换：/model <provider>/<模型id>（如 /model deepseek-official/deepseek-v4-flash）')
+    await safeReply(ctx, service, msg, lines.join('\n'))
+    return
+  }
+
+  // ── 切换：接手/配置会话不适用 ──────────────────────────────
+  if (state?.bound || config.agentId) {
+    await safeReply(ctx, service, msg, '（当前驱动的是接手/配置的 GUI 会话，其模型请在 GUI 会话内切换；或 /detach 后再 /model。）')
+    return
+  }
+
+  // ── 解析 <provider>/<model> 或 <model> ─────────────────────
+  const llm = ctx.get('llm') as ModelDirectoryLlm | undefined
+  let provider: string | undefined
+  let model: string
+  const slash = arg.indexOf('/')
+  if (slash > 0) {
+    provider = arg.slice(0, slash).trim()
+    model = arg.slice(slash + 1).trim()
+  } else {
+    model = arg
+  }
+  if (!provider) {
+    // 只给模型 id：跨 provider 唯一匹配
+    if (!llm || typeof llm.listProviders !== 'function') {
+      await safeReply(ctx, service, msg, '（无法枚举模型目录，请用完整形式 /model <provider>/<model>。）')
+      return
+    }
+    const matches: Array<{ provider: string; model: string }> = []
+    try {
+      for (const p of llm.listProviders()) {
+        try {
+          for (const m of await llm.listModels(p.id)) {
+            if (m.id === model || m.name === model) matches.push({ provider: p.id, model: m.id })
+          }
+        } catch { /* 单个 provider 失败跳过 */ }
+      }
+    } catch { /* 目录枚举失败落入下方完整形式提示 */ }
+    if (matches.length === 0) {
+      await safeReply(ctx, service, msg, `（未找到模型「${model}」。用 /model list 查看可用模型，或 /model <provider>/<model> 指定。）`)
+      return
+    }
+    if (matches.length > 1) {
+      const candidates = matches.slice(0, 8).map(m => `  • ${m.provider} / ${m.model}`).join('\n')
+      await safeReply(ctx, service, msg, `（模型「${model}」在多个 provider 下存在，请用完整形式指定：）\n${candidates}${matches.length > 8 ? '\n…' : ''}`)
+      return
+    }
+    provider = matches[0].provider
+    model = matches[0].model
+  }
+
+  // ── 校验并写入覆盖 ────────────────────────────────────────
+  if (llm && typeof llm.resolveCallConfig === 'function') {
+    try {
+      const resolved = await llm.resolveCallConfig({ provider, model })
+      provider = resolved.provider
+      model = resolved.model
+    } catch (error) {
+      await safeReply(ctx, service, msg, `（模型不可用：${error instanceof Error ? error.message : String(error)}。用 /model list 查看可用模型。）`)
+      return
+    }
+  }
+  if (!provider || !model) {
+    await safeReply(ctx, service, msg, '用法：/model <provider>/<model>（如 /model deepseek-official/deepseek-v4-flash）')
+    return
+  }
+  shared.modelStore?.set(msg.chatId, { provider, model })
+  const live = state?.auto?.agent
+  const liveNote = live
+    ? live.status === 'running'
+      ? '当前任务运行中：本回合剩余部分仍用旧模型，自下一个步骤起用新模型。'
+      : '当前会话在线：下一条消息即用新模型。'
+    : '下一条消息将新建/恢复会话并使用新模型。'
+  await safeReply(ctx, service, msg, `✅ 本会话模型已切换为 ${provider} / ${model}（仅本飞书会话生效，/model reset 恢复默认）。\n${liveNote}`)
+}
+
 /** 飞书会话管理命令：返回 true 表示已拦截处理。 */
 async function handleCommand(
   ctx: Context,
@@ -1053,10 +1332,14 @@ async function handleCommand(
   if (resetCommands.includes(t)) {
     shared.questions.cancelFor(msg.chatId) // 挂起的确认一并取消
     const state = shared.stateByChat.get(msg.chatId)
+    // 参数预览（v0.6.9）：凡「下一条消息将自动新建会话」的分支都附上
+    // 模型/权限/预设/目录，方便在飞书侧直接确认新会话的运行配置。
+    const preview = async (): Promise<string> =>
+      config.mode === 'agent' && !config.agentId ? describeNextSession(ctx, config, shared, msg.chatId) : ''
     if (state?.bound) {
       state.bound = undefined
       shared.store?.delete(msg.chatId)
-      await safeReply(ctx, service, msg, '✅ 已解除会话接手（未销毁目标会话）。下一条消息将自动创建新会话。')
+      await safeReply(ctx, service, msg, `✅ 已解除会话接手（未销毁目标会话）。下一条消息将自动创建新会话。${await preview()}`)
     } else if (state?.auto) {
       const handle = state.auto
       shared.stateByChat.delete(msg.chatId)
@@ -1064,14 +1347,14 @@ async function handleCommand(
       await handle.dispose().catch((error: unknown) => {
         ctx.logger.warn('feishu: 销毁专属 agent 失败', error)
       })
-      await safeReply(ctx, service, msg, '✅ 已开启新会话（上下文已清空），下一条消息将自动创建。')
+      await safeReply(ctx, service, msg, `✅ 已开启新会话（上下文已清空），下一条消息将自动创建。${await preview()}`)
     } else if (config.agentId) {
       await safeReply(ctx, service, msg, `（当前绑定的是配置的 agentId（${config.agentId}），属于 GUI 会话，不能销毁。如需换会话请用 /attach。）`)
     } else {
       // 无活跃会话（重启后 /new）：同样清除持久化映射——否则下一条消息
       // 会 resume 旧会话，用户以为开了新对话实则延续旧上下文（2026-09-02）。
       shared.store?.delete(msg.chatId)
-      await safeReply(ctx, service, msg, '（当前没有活跃会话，已清除持久化映射；下一条消息将新建会话，上下文从零开始。）')
+      await safeReply(ctx, service, msg, `（当前没有活跃会话，已清除持久化映射；下一条消息将新建会话，上下文从零开始。）${await preview()}`)
     }
     return true
   }
@@ -1083,6 +1366,12 @@ async function handleCommand(
     } else {
       await safeReply(ctx, service, msg, '（当前没有待确认的问题。）')
     }
+    return true
+  }
+
+  // ── /model：查看/切换本飞书会话的模型（v0.7.0）──────────────
+  if (t === '/model' || t.startsWith('/model ')) {
+    await handleModelCommand(ctx, service, config, shared, msg, t)
     return true
   }
 
@@ -1202,7 +1491,7 @@ async function handleCommand(
   }
 
   // ── 其他 / 命令：提示帮助，不转发给 agent ───────────────────
-  await safeReply(ctx, service, msg, '可用命令：/new 或 /reset（新会话）· /sessions（列会话）· /attach <会话id>（接手）· /detach（解除）')
+  await safeReply(ctx, service, msg, '可用命令：/new 或 /reset（新会话）· /model（查看/切换模型）· /sessions（列会话）· /attach <会话id>（接手）· /detach（解除）· /cancel（取消确认）')
   return true
 }
 

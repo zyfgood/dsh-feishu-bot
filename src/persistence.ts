@@ -71,3 +71,72 @@ export class ChatSessionStore {
     }
   }
 }
+
+/** /model 命令设置的模型选择（chat_id 维度，跨重启保留）。 */
+export interface StoredModelSelection {
+  provider: string
+  model: string
+}
+
+/** chat_id → 模型选择 的持久化映射（/model 命令写入，原子替换落盘）。 */
+export class ModelOverrideStore {
+  private data = new Map<string, StoredModelSelection>()
+
+  private constructor(
+    private readonly path: string,
+    initial: Record<string, StoredModelSelection>,
+  ) {
+    for (const [chatId, selection] of Object.entries(initial)) {
+      if (selection && typeof selection.provider === 'string' && typeof selection.model === 'string') {
+        this.data.set(chatId, { provider: selection.provider, model: selection.model })
+      }
+    }
+  }
+
+  /** 模型覆盖文件默认位置：$DSH_HOME/feishu-bot/model-overrides.json。 */
+  static defaultPath(): string {
+    const home = process.env.DSH_HOME ?? join(os.homedir(), '.dsh')
+    return join(home, 'feishu-bot', 'model-overrides.json')
+  }
+
+  /** 加载（文件不存在/损坏则视为空映射）。 */
+  static load(path = ModelOverrideStore.defaultPath()): ModelOverrideStore {
+    try {
+      if (existsSync(path)) {
+        const raw = JSON.parse(readFileSync(path, 'utf8')) as Record<string, StoredModelSelection>
+        return new ModelOverrideStore(path, raw)
+      }
+    } catch (error) {
+      // 损坏时忽略并重建（不阻断插件运行）。
+      void error
+    }
+    return new ModelOverrideStore(path, {})
+  }
+
+  get(chatId: string): StoredModelSelection | undefined {
+    return this.data.get(chatId)
+  }
+
+  set(chatId: string, selection: StoredModelSelection): void {
+    this.data.set(chatId, { ...selection })
+    this.save()
+  }
+
+  delete(chatId: string): boolean {
+    const removed = this.data.delete(chatId)
+    if (removed) this.save()
+    return removed
+  }
+
+  private save(): void {
+    try {
+      mkdirSync(join(this.path, '..'), { recursive: true })
+      const tmp = `${this.path}.tmp`
+      writeFileSync(tmp, JSON.stringify(Object.fromEntries(this.data), null, 2), 'utf8')
+      renameSync(tmp, this.path)
+    } catch (error) {
+      // 落盘失败不影响本进程内的切换（重启后回到默认），只记日志。
+      void error
+    }
+  }
+}
