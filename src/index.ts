@@ -127,6 +127,15 @@ export interface Config {
    * 单张卡片可能触及 30KB 上限而自动降级为文本。
    */
   segmentChars?: number
+  /**
+   * 是否在 agent 回合开始时立即上屏「占位卡片」（默认 true，v0.6.7）：
+   * 收到消息即显示打字机占位卡（文案见 {@link Config.streamPlaceholder}），
+   * 工具执行期不再完全静默；首批文本到达后无缝续写同一张卡片。关闭后
+   * 回到旧行为（首批文本到达才创建卡片）。
+   */
+  eagerPlaceholder?: boolean
+  /** 占位卡片文案（默认「收到，正在处理…」）。 */
+  streamPlaceholder?: string
 }
 
 export const Config: z<Config> = z.object({
@@ -145,6 +154,8 @@ export const Config: z<Config> = z.object({
   questionTimeoutMs: z.number().min(1000).default(600_000),
   persistSessions: z.boolean().default(true),
   segmentChars: z.number().min(1000).max(30000).default(8000),
+  eagerPlaceholder: z.boolean().default(true),
+  streamPlaceholder: z.string().default('收到，正在处理…'),
   systemPrompt: z.string().default(
     '你是部署在飞书上的智能助手。请用简洁、友好的中文回答用户的问题；'
     + '涉及代码时直接给出可运行的代码块。',
@@ -189,8 +200,10 @@ export function apply(ctx: Context, config: Config): void {
       respondToMentionAll: config.respondToMentionAll,
     } satisfies FeishuPolicyConfig,
     // 流式卡片分段：超过 segmentChars 自动 rollover 成多张卡片（按代码围栏/标题切）。
+    // streamInitialText：占位卡片文案（v0.6.7 回合开始即上屏，工具期不再静默）。
     outbound: {
       streamMaxElementChars: config.segmentChars ?? 8000,
+      streamInitialText: config.streamPlaceholder ?? '收到，正在处理…',
     },
   })
 

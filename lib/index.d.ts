@@ -119,6 +119,15 @@ export interface Config {
      * 单张卡片可能触及 30KB 上限而自动降级为文本。
      */
     segmentChars?: number;
+    /**
+     * 是否在 agent 回合开始时立即上屏「占位卡片」（默认 true，v0.6.7）：
+     * 收到消息即显示打字机占位卡（文案见 {@link Config.streamPlaceholder}），
+     * 工具执行期不再完全静默；首批文本到达后无缝续写同一张卡片。关闭后
+     * 回到旧行为（首批文本到达才创建卡片）。
+     */
+    eagerPlaceholder?: boolean;
+    /** 占位卡片文案（默认「收到，正在处理…」）。 */
+    streamPlaceholder?: string;
 }
 export declare const Config: z<Config>;
 /** 把 `env:VAR` 形式的配置值解析为环境变量值。 */

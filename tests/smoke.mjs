@@ -950,5 +950,72 @@ console.log('26) 问题卡片 V2 结构')
   ok('问题卡片为 V2 合法结构（按钮平铺、无 action 容器、无 update_multi、value 正确）')
 }
 
+// ── 27. 占位卡片（v0.6.7）：回合开始即上屏，首批文本后续写同一张卡 ──
+console.log('27) 占位卡片：工具执行期即时反馈')
+{
+  const agents = makeAgentsRegistry()
+  let releaseIdle
+  const realCreate = agents.create
+  agents.create = async (opts) => {
+    const h = await realCreate(opts)
+    h.agent.whenIdle = () => new Promise(r => { releaseIdle = r })
+    return h
+  }
+  const { listeners, send, handler, ctx } = await boot(
+    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false, persistSessions: false },
+    { agents, agentPresets: { defaultId: 'standard' } },
+  )
+  let streamCalls = 0
+  const channel = ctx.feishu.channel
+  const origStream = channel.stream
+  channel.stream = async (to, input) => { streamCalls += 1; return origStream(to, input) }
+
+  const pending = handler({ chatId: 'oc_27', messageId: 'om_27', content: '慢慢查', senderId: 'ou_1' })
+  await new Promise(r => setTimeout(r, 80))
+  // 工具执行期（尚无任何文本）：占位卡已启动，且没有多余消息/卡片发出
+  assert.equal(streamCalls, 1, '回合开始应立即启动 1 次原生流式（占位卡）')
+  assert.equal(send.length, 0, '工具期不应额外发送内容消息（占位卡由 SDK 承载）')
+
+  // 首批文本到达：续写同一张卡（不新增流式）
+  const agent = agents.roots()[0]
+  listeners['session/event']?.forEach(fn => fn({ id: agent.id }, { type: 'assistant/chunk', data: { chunk: { type: 'text-delta', index: 0, text: '分析完成，结论如下。' } } }))
+  await new Promise(r => setTimeout(r, 600))
+  assert.equal(streamCalls, 1, '首批文本应续写同一张占位卡（不新增流式）')
+  assert.ok(send.map(s => textOf(s.input)).join('').includes('分析完成，结论如下。'), '占位卡上应已有正文')
+
+  releaseIdle()
+  await pending
+  await new Promise(r => setTimeout(r, 50))
+  assert.equal(streamCalls, 1, '整回合只应有一次原生流式')
+  assert.ok(textOf(send[send.length - 1].input).includes('分析完成，结论如下。'), '收尾内容完整')
+  ok('占位卡片：回合开始即上屏，首批文本无缝续写（整回合 1 次流式）')
+}
+
+// ── 28. 空回合：占位卡以中性提示收尾，不出现 '(no content)' ──────
+console.log('28) 空回合中性收尾')
+{
+  const agents = makeAgentsRegistry()
+  let releaseIdle
+  const realCreate = agents.create
+  agents.create = async (opts) => {
+    const h = await realCreate(opts)
+    h.agent.whenIdle = () => new Promise(r => { releaseIdle = r })
+    return h
+  }
+  const { send, handler } = await boot(
+    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false, persistSessions: false },
+    { agents, agentPresets: { defaultId: 'standard' } },
+  )
+  const pending = handler({ chatId: 'oc_28', messageId: 'om_28', content: '只跑工具不说话', senderId: 'ou_1' })
+  await new Promise(r => setTimeout(r, 80))
+  releaseIdle()
+  await pending
+  await new Promise(r => setTimeout(r, 50))
+  const joined = send.map(s => textOf(s.input)).join('\n')
+  assert.ok(joined.includes('（本轮没有文本输出）'), '空回合应以中性提示收尾')
+  assert.ok(!joined.includes('(no content)'), '不应出现 SDK 默认英文占位')
+  ok('空回合：占位卡中性提示收尾')
+}
+
 console.log(`\n全部通过（${passed} 项断言组）✅`)
 
