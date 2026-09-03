@@ -13,8 +13,12 @@ DeepSeek Harness（DSH）插件：**绑定飞书（Feishu / Lark）机器人并�
     具备全部 DSH 工具），agent 输出**流式实时转发**到飞书。
 - **任务执行中提问**：agent 正在跑任务时发消息，会用 `steer` 在下一个节点
   插入你的问题，agent 先回应（流式实时到达）再继续任务。
-- **互动（出站）**：注册 6 个模型可调用的 `feishu_*` 工具，让 DSH agent 主动
-  与飞书互动（发消息、回复消息、查会话、查消息、查连接状态）。
+- **互动（出站）**：注册 9 个模型可调用的 `feishu_*` 工具，让 DSH agent 主动
+  与飞书互动（发消息、回复消息、发交互卡片、确认问答、查会话、查消息、
+  查连接状态、推送目标群）。
+- **确认问答**：agent 调用 `ask_user_question` / `feishu_ask_choice` 需要你拍板时，
+  问题以**带按钮的交互卡片**发到飞书（点按钮 / 回编号 / 回选项文字均可），
+  回答后卡片定格为结果视图，agent 继续流式输出。
 - **策略**：群聊 @机器人 才回复、私聊开关、会话白名单、@所有人 响应开关，均由
   SDK 的入站策略管道执行。
 
@@ -40,9 +44,15 @@ public callback URL needed (official WebSocket long connection, auto-reconnect).
   chat's model — effective from the next step on the live session, persisted
   per chat), `/sessions` (list sessions), `/attach` (take over an existing GUI
   session — both sides share context), `/detach`.
-- **Outbound (agent → Feishu)**: six model-callable tools
-  (`feishu_send_message`, `feishu_reply_message`, `feishu_list_chats`,
-  `feishu_get_messages`, `feishu_get_chat_info`, `feishu_connection_status`).
+- **Outbound (agent → Feishu)**: nine model-callable tools
+  (`feishu_send_message`, `feishu_send_card`, `feishu_ask_choice`,
+  `feishu_reply_message`, `feishu_list_chats`, `feishu_get_messages`,
+  `feishu_get_chat_info`, `feishu_connection_status`, `feishu_push`).
+- **Interactive confirmation**: when the agent needs a decision
+  (`ask_user_question` / `feishu_ask_choice`), a button card is sent to the
+  chat — click, or reply with the option number/text. After answering (or on
+  timeout) the card freezes into a result view, and the agent's continuation
+  streams into a fresh typewriter card.
 - **Policies**: group chats reply only when mentioned, DM on/off, chat
   allowlists, respond-to-@all switch — all via the SDK inbound policy pipeline.
 - **Config**: `appId`/`appSecret` via `env:VAR` (never plaintext), `domain`
@@ -430,6 +440,15 @@ SDK 按前缀自动推断接收方类型。按钮卡片（`feishu_ask_choice` / 
   打字机卡，工具执行期不再静默，首批文本到达后无缝续写同一张卡；回合
   内被 steer 接管或整轮无文本输出时占位卡会以中性提示收尾，不会悬挂
   打字光标。
+- **确认问答点击选项后「断流」（原卡冻结、闪现空卡）**：v0.8.0 之前的机制缺陷
+  （2026-09-03 事故：等待 243 秒后点击）——回合开始即开启的原生打字机卡片在
+  等待回答期间持续空转，而飞书 cardkit 流式卡片服务端约 10 分钟自动关闭
+  （200850）、插件 8 分钟钉头上限只在下一批文本到达时才检查；回答后的续写
+  到达时原卡早已被服务端关闭，只能切旧链路：光标消失、原卡定格、闪现一张
+  空卡、续写落到新消息。v0.8.0 起发起问答时即优雅收尾当前打字机卡（去光标
+  定格、等待期不再消耗流式寿命），回答后开**新的打字机卡**续流，且切链路
+  尾部为空时不再发送空卡；同时问题卡片在回答/超时/取消后定格为结果视图
+  （「✅ 已选择：xx」等，按钮不再出现）。
 - **重启 / /detach 后机器人接着旧会话继续，而不是新会话**：这是
   `persistSessions`（默认开）的设计行为——chat→会话映射落盘，dsh web
   重启、GUI 重开、`/attach` 再 `/detach` 都**不会**清除该映射，下一条
