@@ -216,6 +216,37 @@ console.log('7) /new 重置')
   ok('/new 销毁会话并确认')
 }
 
+// ── 7b. /attach 自己的专属会话后 /new：必须真正新建（2026-09-04 回归）──
+console.log('7b) /attach 专属会话后 /new 完全重置')
+{
+  const agents = makeAgentsRegistry()
+  const { send, handler } = await boot(
+    { appId: 'cli_x', appSecret: 's', mode: 'agent', workspace: '/mnt/d/DSHProjects', tools: false, persistSessions: false },
+    { agents },
+  )
+  // 建立专属会话
+  await handler({ chatId: 'oc_4b', messageId: 'om_5b', content: 'hi', senderId: 'ou_1' })
+  await new Promise(r => setTimeout(r, 30))
+  const firstId = agents.roots()[0].id
+  // /attach 编号 1 = 本会话自己的专属会话 → bound 与 auto 指向同一 agent
+  await handler({ chatId: 'oc_4b', messageId: 'om_6b', content: '/sessions', senderId: 'ou_1' })
+  await new Promise(r => setTimeout(r, 20))
+  await handler({ chatId: 'oc_4b', messageId: 'om_7b', content: '/attach 1', senderId: 'ou_1' })
+  await new Promise(r => setTimeout(r, 20))
+  assert.ok(send.some(s => textOf(s.input).includes('已接手')), '/attach 应成功')
+  // /new：旧代码只清 bound、残留 auto → 下一条消息复用旧会话
+  await handler({ chatId: 'oc_4b', messageId: 'om_8b', content: '/new', senderId: 'ou_1' })
+  await new Promise(r => setTimeout(r, 30))
+  assert.ok(reply(send).includes('已解除会话接手'), '/new 应确认重置')
+  assert.equal(agents.roots().length, 0, '/new 应销毁专属 agent（即使同时处于接手状态）')
+  // 下一条消息必须新建会话，而不是复用旧的
+  await handler({ chatId: 'oc_4b', messageId: 'om_9b', content: '新任务', senderId: 'ou_1' })
+  await new Promise(r => setTimeout(r, 30))
+  assert.equal(agents.roots().length, 1, '下一条消息应新建专属会话')
+  assert.notEqual(agents.roots()[0].id, firstId, '新会话不能是旧会话')
+  ok('/attach 自己 → /new → 下一条真正新建')
+}
+
 // ── 8. /sessions 可读列表 + 编号 /attach ─────────────────────
 console.log('8) /sessions + /attach 编号')
 {

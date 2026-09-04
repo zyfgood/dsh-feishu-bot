@@ -1409,13 +1409,27 @@ async function handleCommand(
     const preview = async (): Promise<string> =>
       config.mode === 'agent' && !config.agentId ? describeNextSession(ctx, config, shared, msg.chatId) : ''
     if (state?.bound) {
+      // 2026-09-04 修复：/attach 可以接手本会话自己的专属会话（feishu-*），
+      // 此时 state.auto 与 state.bound 指向同一 agent。只清 bound 会让
+      // resolveAgent 的 auto 复用路径继续生效——回复承诺「下一条将自动创建」
+      // 实际却复用旧会话。因此 /new 在这里做完全重置：解除接手（GUI 目标
+      // 会话不销毁），同时销毁本会话的专属 agent 并清空全部绑定。
+      const auto = state.auto
       state.bound = undefined
+      shared.stateByChat.delete(msg.chatId)
       shared.store?.delete(msg.chatId)
-      await safeReply(ctx, service, msg, `✅ 已解除会话接手（未销毁目标会话）。下一条消息将自动创建新会话。${await preview()}`)
+      if (auto) {
+        shared.chatByAgent.delete(auto.agent.id)
+        await auto.dispose().catch((error: unknown) => {
+          ctx.logger.warn('feishu: 销毁专属 agent 失败', error)
+        })
+      }
+      await safeReply(ctx, service, msg, `✅ 已解除会话接手${auto ? '并清空专属上下文' : ''}。下一条消息将自动创建新会话。${await preview()}`)
     } else if (state?.auto) {
       const handle = state.auto
       shared.stateByChat.delete(msg.chatId)
       shared.store?.delete(msg.chatId)
+      shared.chatByAgent.delete(handle.agent.id)
       await handle.dispose().catch((error: unknown) => {
         ctx.logger.warn('feishu: 销毁专属 agent 失败', error)
       })
@@ -1546,15 +1560,26 @@ async function handleCommand(
     const state = shared.stateByChat.get(msg.chatId)
     if (state?.bound) {
       state.bound = undefined
-      // 状态透明化（v0.6.8）：如实告知下一条消息的去向。持久映射存在时
-      // 自动模式 = 恢复映射会话（不是新建！）——2026-09-02 晚曾出现
-      // 「/detach 后以为会开新会话，实际 resume 了白天会话」的误会。
+      // 状态透明化（v0.6.8）：如实告知下一条消息的去向。优先级与
+      // resolveAgent 一致：配置 agentId > 本会话专属 auto 会话 > 持久映射
+      // > 新建。2026-09-04 修正：auto 存在时旧文案会说「自动创建新会话」，
+      // 实际 resolveAgent 会复用 auto 会话（/attach 接手 GUI 会话后 /detach
+      // 的典型场景），造成「/detach 后以为开新会话实则延续旧上下文」的误会。
       const mapped = shared.store?.get(msg.chatId)
+      const auto = state.auto
+      let autoLive = false
+      if (auto) {
+        const agents = ctx.get('agents') as AgentRegistry | undefined
+        autoLive = !agents || isLiveAgent(agents, auto.agent)
+      }
+      const autoId = auto?.agent.id
       const next = config.agentId
         ? `下一条消息将使用配置的会话 ${config.agentId}。`
-        : mapped
-          ? `下一条消息将自动恢复会话 ${shortSessionId(mapped)}（延续其上下文）；如需全新会话请先发 /new。`
-          : '下一条消息将自动创建新会话。'
+        : autoLive && autoId
+          ? `下一条消息将回到本会话专属会话 ${shortSessionId(autoId)}（延续其上下文）；要全新会话请先发 /new。`
+          : mapped
+            ? `下一条消息将自动恢复会话 ${shortSessionId(mapped)}（延续其上下文）；如需全新会话请先发 /new。`
+            : '下一条消息将自动创建新会话。'
       await safeReply(ctx, service, msg, `✅ 已解除接手。${next}`)
     } else {
       await safeReply(ctx, service, msg, '（当前没有接手的会话。）')
