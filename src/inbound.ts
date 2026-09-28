@@ -257,6 +257,26 @@ function collectAssistantText(events: readonly SessionEvent[], afterSeq: number)
   return parts.join('\n').trim()
 }
 
+/**
+ * 读取会话事件日志（dsh 0.1.2+ 的 snapshotEvents() / 旧内核 .events 双兼容）。
+ * 类型用结构化声明，两代内核的 .d.ts 都能编译。
+ */
+function readSessionEvents(agent: Agent): readonly SessionEvent[] {
+  const session = agent.session as unknown as {
+    snapshotEvents?: () => readonly SessionEvent[]
+    events?: readonly SessionEvent[]
+  }
+  return typeof session.snapshotEvents === 'function'
+    ? session.snapshotEvents()
+    : (session.events ?? [])
+}
+
+/** 会话日志当前最大 seq（回合启动前调用，供结束后按 seq 过滤本轮新增事件）。 */
+function lastSessionSeq(agent: Agent): number {
+  const events = readSessionEvents(agent)
+  return events.length > 0 ? events[events.length - 1].seq : 0
+}
+
 /** 当前回复排版格式（attachInbound 时按配置设定，默认 markdown 富文本）。 */
 let replyFormat: 'markdown' | 'text' = 'markdown'
 
@@ -376,14 +396,8 @@ async function sendRecentHistory(
   const rows: string[] = []
   // dsh 0.1.2 移除了 Session.events getter（改为按需的 snapshotEvents()/eventAt()）。
   // 特性检测双兼容：新内核走 snapshotEvents()（默认参数 = 全量日志，与旧 .events 同语义），
-  // 旧内核（≤0.1.1）走 events。类型用结构化声明，两代内核的 .d.ts 都能编译。
-  const session = agent.session as unknown as {
-    snapshotEvents?: () => readonly SessionEvent[]
-    events?: readonly SessionEvent[]
-  }
-  const events = typeof session.snapshotEvents === 'function'
-    ? session.snapshotEvents()
-    : (session.events ?? [])
+  // 旧内核（≤0.1.1）走 events。见 readSessionEvents。
+  const events = readSessionEvents(agent)
   for (const event of events) {
     if (event.type === 'user/message') {
       const data = event.data as { content?: readonly ContentBlock[] }
@@ -1166,8 +1180,26 @@ async function agentReply(
   // v0.6.7 占位卡片：回合开始即上屏（「收到，正在处理…」打字机卡片），
   // 工具执行期不再无声无息；首批文本到达后续写同一张卡（见 relayShowPlaceholder）。
   if (config.eagerPlaceholder !== false) relayShowPlaceholder(ctx, service, shared.relays, relay)
+  const seqBefore = lastSessionSeq(agent)
   agent.followup(message)
   await agent.whenIdle()
+  // 兜底（v0.8.4）：整轮流式未积累到任何文本（内核流式事件再变更、provider
+  // 无增量输出等）时，从会话日志收集本轮 assistant 可见文本补发，保证最终
+  // 回复必达——流式链路再断也只损失打字机效果，不丢回复。
+  if (relay.text.trim() === '') {
+    const missed = collectAssistantText(readSessionEvents(agent), seqBefore)
+    if (missed !== '') {
+      ctx.logger.warn(`feishu: 本轮未收到流式文本（agent=${agent.id}），从会话日志补发 ${missed.length} 字符`)
+      if (shared.relays.get(agent.id) === relay) {
+        // relay 尚未被 idle 兜底收尾：注入文本，统一收尾路径定格占位卡为回复。
+        relay.text = missed
+      } else {
+        // relay 已被 idle 兜底收尾（占位卡已定格为「本轮没有文本输出」）：
+        // 直接补发一条引用回复，内容必达。
+        await safeReply(ctx, service, msg, missed)
+      }
+    }
+  }
   await relayFlush(ctx, service, shared.relays, relay, true)
   if (relay.messageId === undefined) {
     ctx.logger.debug(`feishu: agent ${agent.id} 未产生文本输出`)
@@ -1607,19 +1639,24 @@ export function attachInbound(
   const history = new Map<string, Message[]>()
 
   // ── 全局流式转发：agent 输出 → 飞书 ─────────────────────────
-  // assistant/chunk（text-delta）实时刷新到飞书消息；steer 路径
-  // （stopOnToolCall）在下一个工具调用时收尾。
-  ctx.on('session/event', (session, event) => {
-    if (event.type !== 'assistant/chunk') return
-    const relay = shared.relays.get(session.id)
+  // dsh 0.1.7 起 live 流式不再以 assistant/chunk 会话事件发布（会话日志只在
+  // 收尾时记录 attempt/message），实时增量改为 agent 作用域事件
+  // agent/assistant-stream 的 chunk 帧——frame.chunk 的形状与旧
+  // assistant/chunk 事件的 data.chunk 完全一致（text-delta / tool-call-delta）。
+  // { global: true } 确保插件上下文收到所有 agent 的帧（与内核
+  // session-controller/history.ts 的订阅方式一致）。text-delta 实时刷新到
+  // 飞书消息；steer 路径（stopOnToolCall）在下一个工具调用时收尾。
+  ctx.on('agent/assistant-stream', ({ agent, frame }) => {
+    if (frame.type !== 'chunk') return
+    const relay = shared.relays.get(agent.id)
     if (!relay) return
-    const chunk = event.data.chunk
+    const chunk = frame.chunk
     if (chunk.type === 'text-delta') {
       relayAppend(ctx, service, shared.relays, relay, chunk.text)
     } else if (chunk.type === 'tool-call-delta' && relay.stopOnToolCall) {
       relayEnd(ctx, service, shared.relays, relay)
     }
-  })
+  }, { global: true })
 
   // agent 回到 idle 时收尾所有该 agent 的流式转发（兜底：steer 路径
   // 若 agent 不再调用工具而直接结束）。

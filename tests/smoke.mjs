@@ -324,8 +324,8 @@ console.log('10) 流式输出')
     h.agent.followup = () => {
       origFollowup()
       // 模拟 agent 流式输出两个文本块
-      listeners['session/event']?.forEach(fn => fn({ id: h.agent.id }, { type: 'assistant/chunk', data: { chunk: { type: 'text-delta', index: 0, text: '你好，我' } } }))
-      listeners['session/event']?.forEach(fn => fn({ id: h.agent.id }, { type: 'assistant/chunk', data: { chunk: { type: 'text-delta', index: 0, text: '是流式输出！' } } }))
+      listeners['agent/assistant-stream']?.forEach(fn => fn({ agent: { id: h.agent.id }, frame: { type: 'chunk', chunk: { type: 'text-delta', index: 0, text: '你好，我' } } }))
+      listeners['agent/assistant-stream']?.forEach(fn => fn({ agent: { id: h.agent.id }, frame: { type: 'chunk', chunk: { type: 'text-delta', index: 0, text: '是流式输出！' } } }))
     }
     return h
   }
@@ -355,7 +355,7 @@ console.log('10b) 原生流式增量刷新')
     h.agent.followup = () => {
       origFollowup()
       // 模拟 agent 流式输出，分多次（跨节流窗口）
-      const emit = (t) => listeners['session/event']?.forEach(fn => fn({ id: h.agent.id }, { type: 'assistant/chunk', data: { chunk: { type: 'text-delta', index: 0, text: t } } }))
+      const emit = (t) => listeners['agent/assistant-stream']?.forEach(fn => fn({ agent: { id: h.agent.id }, frame: { type: 'chunk', chunk: { type: 'text-delta', index: 0, text: t } } }))
       emit('第一段。')
       setTimeout(() => emit('第二段。'), 100)
       setTimeout(() => emit('第三段，结束。'), 500)
@@ -391,10 +391,10 @@ console.log('11) 任务执行中回应')
   assert.equal(live.steered.length, 1, 'running 时应 steer 而非 followup')
   assert.ok(reply(send).includes('📥 已收到'), '应回确认消息')
   // agent 在下一节点回应（流式），然后继续任务（tool-call）→ 收尾
-  listeners['session/event']?.forEach(fn => fn({ id: live.id }, { type: 'assistant/chunk', data: { chunk: { type: 'text-delta', index: 0, text: '进度 50%，' } } }))
-  listeners['session/event']?.forEach(fn => fn({ id: live.id }, { type: 'assistant/chunk', data: { chunk: { type: 'text-delta', index: 0, text: '马上好。' } } }))
+  listeners['agent/assistant-stream']?.forEach(fn => fn({ agent: { id: live.id }, frame: { type: 'chunk', chunk: { type: 'text-delta', index: 0, text: '进度 50%，' } } }))
+  listeners['agent/assistant-stream']?.forEach(fn => fn({ agent: { id: live.id }, frame: { type: 'chunk', chunk: { type: 'text-delta', index: 0, text: '马上好。' } } }))
   await new Promise(r => setTimeout(r, 700))
-  listeners['session/event']?.forEach(fn => fn({ id: live.id }, { type: 'assistant/chunk', data: { chunk: { type: 'tool-call-delta', index: 1, id: 'call_1', name: 'bash', argumentsDelta: '' } } }))
+  listeners['agent/assistant-stream']?.forEach(fn => fn({ agent: { id: live.id }, frame: { type: 'chunk', chunk: { type: 'tool-call-delta', index: 1, id: 'call_1', name: 'bash', argumentsDelta: '' } } }))
   await new Promise(r => setTimeout(r, 50))
   const sentTexts = send.map(s => textOf(s.input)).filter(Boolean)
   assert.ok(sentTexts.some(t => t.includes('进度 50%')), '任务中回应应流式转发')
@@ -728,7 +728,7 @@ console.log('20) 旧链路分段发送')
   const longLines = []
   for (let i = 1; i <= 300; i += 1) longLines.push(`const line_${i} = ${i}; // 第 ${i} 行，凑长一些的内容让分段阈值生效`)
   const fileText = '```python\n' + longLines.join('\n') + '\n```'
-  listeners['session/event']?.forEach(fn => fn({ id: agent.id }, { type: 'assistant/chunk', data: { chunk: { type: 'text-delta', index: 0, text: fileText } } }))
+  listeners['agent/assistant-stream']?.forEach(fn => fn({ agent: { id: agent.id }, frame: { type: 'chunk', chunk: { type: 'text-delta', index: 0, text: fileText } } }))
   await new Promise(r => setTimeout(r, 1500)) // 覆盖节流窗口 + 原生流式降级 + 收尾
   const cardSends = send.filter(s => s.input?.card && s.to !== 'EDIT-CARD')
   assert.ok(cardSends.length >= 3, `应发送至少 3 张分段卡片（实际 ${cardSends.length}）`)
@@ -808,7 +808,7 @@ console.log('22) 原生流式钉头切链路')
   const longLines = []
   for (let i = 1; i <= 300; i += 1) longLines.push(`const line_${i} = ${i}; // 第 ${i} 行，凑长一些的内容让分段阈值生效`)
   const fileText = '```python\n' + longLines.join('\n') + '\n```'
-  listeners['session/event']?.forEach(fn => fn({ id: agent.id }, { type: 'assistant/chunk', data: { chunk: { type: 'text-delta', index: 0, text: fileText } } }))
+  listeners['agent/assistant-stream']?.forEach(fn => fn({ agent: { id: agent.id }, frame: { type: 'chunk', chunk: { type: 'text-delta', index: 0, text: fileText } } }))
   await new Promise(r => setTimeout(r, 1500))
   // 区分：原生流式推送（无 schema 字段）与旧链路卡片（schema: '2.0'）
   const streamPushes = send.filter(s => s.input?.card && s.input.card.schema === undefined && s.input.card.body?.elements?.some(e => e.tag === 'markdown'))
@@ -864,7 +864,7 @@ console.log('23) 超长单行不冻结')
     x = (x * 1103515245 + 12345) & 0x7fffffff
     single += String(x % 10)
   }
-  listeners['session/event']?.forEach(fn => fn({ id: agent.id }, { type: 'assistant/chunk', data: { chunk: { type: 'text-delta', index: 0, text: single } } }))
+  listeners['agent/assistant-stream']?.forEach(fn => fn({ agent: { id: agent.id }, frame: { type: 'chunk', chunk: { type: 'text-delta', index: 0, text: single } } }))
   await new Promise(r => setTimeout(r, 1500))
   const streamPushes = send.filter(s => s.input?.card && s.input.card.schema === undefined && s.input.card.body?.elements?.some(e => e.tag === 'markdown'))
   const cardSends = send.filter(s => s.input?.card && s.input.card.schema === '2.0')
@@ -1012,7 +1012,7 @@ console.log('27) 占位卡片：工具执行期即时反馈')
 
   // 首批文本到达：续写同一张卡（不新增流式）
   const agent = agents.roots()[0]
-  listeners['session/event']?.forEach(fn => fn({ id: agent.id }, { type: 'assistant/chunk', data: { chunk: { type: 'text-delta', index: 0, text: '分析完成，结论如下。' } } }))
+  listeners['agent/assistant-stream']?.forEach(fn => fn({ agent: { id: agent.id }, frame: { type: 'chunk', chunk: { type: 'text-delta', index: 0, text: '分析完成，结论如下。' } } }))
   await new Promise(r => setTimeout(r, 600))
   assert.equal(streamCalls, 1, '首批文本应续写同一张占位卡（不新增流式）')
   assert.ok(send.map(s => textOf(s.input)).join('').includes('分析完成，结论如下。'), '占位卡上应已有正文')
@@ -1034,6 +1034,11 @@ console.log('28) 空回合中性收尾')
   agents.create = async (opts) => {
     const h = await realCreate(opts)
     h.agent.whenIdle = () => new Promise(r => { releaseIdle = r })
+    // 空回合格景：followup 只落用户消息，不产生任何 assistant 可见文本
+    //（真实内核中「只跑工具不说话」的回合不会落带文本的 assistant/message）。
+    h.agent.followup = () => {
+      h.agent.session.events.push({ seq: h.agent.session.seq + 1, type: 'user/message', data: {} })
+    }
     return h
   }
   const { send, handler } = await boot(
@@ -1363,7 +1368,7 @@ console.log('33) 问答断流修复：收尾旧卡 + 新卡续流')
   const pending = handler({ chatId: 'oc_33', messageId: 'om_33', content: '先流式一段再问我', senderId: 'ou_1' })
   await new Promise(r => setTimeout(r, 80))
   const agent = agents.roots()[0]
-  const emit = (t) => listeners['session/event']?.forEach(fn => fn({ id: agent.id }, { type: 'assistant/chunk', data: { chunk: { type: 'text-delta', index: 0, text: t } } }))
+  const emit = (t) => listeners['agent/assistant-stream']?.forEach(fn => fn({ agent: { id: agent.id }, frame: { type: 'chunk', chunk: { type: 'text-delta', index: 0, text: t } } }))
   // 阶段 1：回合内先流式一段文本（进入打字机卡 #1）
   emit('先输出一段勘察结论。')
   await new Promise(r => setTimeout(r, 600))
