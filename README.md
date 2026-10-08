@@ -41,9 +41,10 @@ public callback URL needed (official WebSocket long connection, auto-reconnect).
   continues the task.
 - **Session commands**: `/new` (fresh context, reply previews the next
   session's model/permission/preset/workspace), `/model` (view or switch this
-  chat's model — effective from the next step on the live session, persisted
-  per chat), `/sessions` (list sessions), `/attach` (take over an existing GUI
-  session — both sides share context), `/detach`.
+  chat's model — `/model list` numbers each model so you can switch with
+  `/model <n>` just like `/attach <n>`; effective from the next step on the
+  live session, persisted per chat), `/sessions` (list sessions), `/attach`
+  (take over an existing GUI session — both sides share context), `/detach`.
 - **Outbound (agent → Feishu)**: nine model-callable tools
   (`feishu_send_message`, `feishu_send_card`, `feishu_ask_choice`,
   `feishu_reply_message`, `feishu_list_chats`, `feishu_get_messages`,
@@ -244,6 +245,8 @@ dsh --profile web
 后写入，对**活跃会话从下一个 step 生效**（与 GUI 切模型同一机制：
 `installModelSelection` 每 step 实时读取，运行中任务当前 step 不受影响），
 之后新建/恢复的会话也沿用；`/model reset` 清除覆盖回到第 2/3 层。
+`/model list` 为每个模型标注连续编号并按会话记忆，之后 `/model <编号>`
+即可切换（与 `/attach <编号>` 同一交互模式，编号以最近一次列表为准）。
 `/attach` 接手或 `agentId` 配置的 GUI 会话不适用（模型在 GUI 会话内切换）。
 
 权限与预设跟随 DSH 全局设置，插件不单独覆盖：权限预设取
@@ -325,7 +328,7 @@ agent 在飞书会话里调用 `ask_user_question`（需要你确认/选择）�
 | 命令 | 作用 |
 |---|---|
 | `/new` 或 `/reset` | **开始新会话**：完全重置本飞书会话——销毁专属 agent（即便当前正 `/attach` 接手它）、清除接手绑定与持久映射，下一条消息自动新建（上下文清空）；v0.6.9 起回复附带**新会话参数预览**（模型及来源、权限预设 sandbox/approval、agent 预设、工作目录） |
-| `/model` | **查看/切换本飞书会话的模型**（v0.7.0）：`/model` 看状态 · `/model list` 列可用模型 · `/model <provider>/<模型id>` 精确切换 · `/model <模型id>` 唯一匹配（歧义时列候选） · `/model reset` 恢复默认。切换对活跃会话自下一个 step 生效（运行中任务不撕裂），并持久化跨重启（`model-overrides.json`）；仅影响本飞书会话 |
+| `/model` | **查看/切换本飞书会话的模型**（v0.7.0）：`/model` 看状态 · `/model list` 列可用模型（带编号） · `/model <编号>` 数字切换（参照 `/attach`，如 `/model 3`） · `/model <provider>/<模型id>` 精确切换 · `/model <模型id>` 唯一匹配（歧义时列候选） · `/model reset` 恢复默认。切换对活跃会话自下一个 step 生效（运行中任务不撕裂），并持久化跨重启（`model-overrides.json`）；仅影响本飞书会话 |
 | `/sessions` | 列出当前活跃的 DSH agent 会话（编号 + 标题 + 模型 + 工作目录） |
 | `/attach <编号或会话id>` | **接手 GUI 中某个既有会话**：此后该飞书会话直接驱动它（两边共享上下文，GUI 可见） |
 | `/detach` | 解除接手（回复会如实说明下一条消息的去向，优先级与路由一致：配置 agentId → 本会话专属会话（若有）→ 持久映射 → 自动新建，并附 `/new` 指引） |

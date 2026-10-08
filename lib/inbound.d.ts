@@ -100,6 +100,12 @@ interface ChatBinding {
         index: number;
         id: string;
     }>;
+    /** 最近一次 `/model list` 的编号 → provider/model 映射（支持 /model 数字选择）。 */
+    lastModelList?: Array<{
+        index: number;
+        provider: string;
+        model: string;
+    }>;
 }
 /** agent 模式共享状态：会话绑定、流式转发、确认问答、持久化。 */
 export interface InboundShared {

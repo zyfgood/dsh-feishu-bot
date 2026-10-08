@@ -206,6 +206,8 @@ interface ChatBinding {
   auto?: AgentHandle
   /** 最近一次 `/sessions` 的编号 → 会话 id 映射（支持 /attach 数字选择）。 */
   lastList?: Array<{ index: number; id: string }>
+  /** 最近一次 `/model list` 的编号 → provider/model 映射（支持 /model 数字选择）。 */
+  lastModelList?: Array<{ index: number; provider: string; model: string }>
 }
 
 /** agent 模式共享状态：会话绑定、流式转发、确认问答、持久化。 */
@@ -1257,6 +1259,7 @@ interface ModelDirectoryLlm {
  * - `/model reset`      清除本会话覆盖，恢复跟随默认
  * - `/model <p>/<m>`    精确指定 provider 与模型（经 llm 校验）
  * - `/model <m>`        只给模型 id：跨 provider 唯一匹配，歧义时列候选
+ * - `/model <编号>`     数字选择：最近一次 /model list 列表中的模型
  *
  * 覆盖按 chat_id 维度持久化（model-overrides.json），只影响本飞书会话：
  * 活跃会话经 installModelSelection 从下一个 step 生效；新建/恢复会话在
@@ -1295,7 +1298,7 @@ async function handleModelCommand(
       lines.push(`💬 活跃会话：${shortSessionId(state.auto.agent.id)}${state.auto.agent.status === 'running' ? '（任务运行中，切换从下一 step 生效）' : ''}`)
     }
     lines.push('')
-    lines.push('用法：/model <provider>/<model> 切换 · /model <模型id> 唯一匹配 · /model list 列表 · /model reset 恢复默认')
+    lines.push('用法：/model <编号> 切换（先 /model list）· /model <provider>/<model> 精确指定 · /model list 列表 · /model reset 恢复默认')
     lines.push('切换仅对本飞书会话生效（含之后新建的会话），不影响 GUI 其他会话。')
     await safeReply(ctx, service, msg, lines.join('\n'))
     return
@@ -1319,6 +1322,7 @@ async function handleModelCommand(
     }
     const selection = resolveAgentModel(ctx, config, msg.chatId, shared)
     const lines: string[] = ['可用模型：']
+    const lastModelList: Array<{ index: number; provider: string; model: string }> = []
     let truncated = false
     try {
       for (const provider of llm.listProviders()) {
@@ -1330,8 +1334,10 @@ async function handleModelCommand(
         lines.push(`【${provider.id}】${provider.name ?? ''}`)
         const shown = models.slice(0, 15)
         for (const m of shown) {
+          const index = lastModelList.length + 1
+          lastModelList.push({ index, provider: provider.id, model: m.id })
           const mark = selection && selection.provider === provider.id && selection.model === m.id ? ' ← 当前' : ''
-          lines.push(`  • ${m.id}${m.name && m.name !== m.id ? `（${m.name}）` : ''}${mark}`)
+          lines.push(`  ${index}. ${m.id}${m.name && m.name !== m.id ? `（${m.name}）` : ''}${mark}`)
         }
         if (models.length > shown.length) lines.push(`  …共 ${models.length} 个（略）`)
         if (models.length === 0) lines.push('  （无已注册模型）')
@@ -1340,8 +1346,12 @@ async function handleModelCommand(
       ctx.logger.warn('feishu: /model list 枚举失败', error)
     }
     if (truncated) lines.push('…（列表过长已截断）')
+    // 记录编号映射，支持 /model <编号> 数字切换（参照 /attach 的方式）。
+    const state = shared.stateByChat.get(msg.chatId) ?? {}
+    state.lastModelList = lastModelList
+    shared.stateByChat.set(msg.chatId, state)
     lines.push('')
-    lines.push('切换：/model <provider>/<模型id>（如 /model deepseek-official/deepseek-v4-flash）')
+    lines.push('切换：/model <编号>（如 /model 3）· /model <provider>/<模型id>（如 /model deepseek-official/deepseek-v4-flash）')
     await safeReply(ctx, service, msg, lines.join('\n'))
     return
   }
@@ -1352,7 +1362,7 @@ async function handleModelCommand(
     return
   }
 
-  // ── 解析 <provider>/<model> 或 <model> ─────────────────────
+  // ── 解析 <编号> / <provider>/<model> / <model> ───────────
   const llm = ctx.get('llm') as ModelDirectoryLlm | undefined
   let provider: string | undefined
   let model: string
@@ -1360,6 +1370,15 @@ async function handleModelCommand(
   if (slash > 0) {
     provider = arg.slice(0, slash).trim()
     model = arg.slice(slash + 1).trim()
+  } else if (/^\d+$/.test(arg)) {
+    // 数字编号 → 最近一次 /model list 列表中的模型（参照 /attach）
+    const entry = state?.lastModelList?.find(item => item.index === Number(arg))
+    if (!entry) {
+      await safeReply(ctx, service, msg, `（没有编号 ${arg}。请先发 /model list 获取最新列表。）`)
+      return
+    }
+    provider = entry.provider
+    model = entry.model
   } else {
     model = arg
   }
