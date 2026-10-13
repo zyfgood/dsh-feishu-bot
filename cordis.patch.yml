@@ -3,6 +3,7 @@
 # 通过官方 CLI 安装时——
 #
 #   dsh plugin --profile <name> add "github:zyfgood/dsh-feishu-bot#main&path:/"
+#   dsh plugin --profile <name> add @zyfgood/dsh-feishu-bot   # npm 渠道
 #
 # ——CLI 会把本包加入 profile 的 bundle 栈；profile 启动时合并此 patch
 #（单行 insert 插件行），无需手工编辑 cordis.yml，一条命令完成安装与挂载。

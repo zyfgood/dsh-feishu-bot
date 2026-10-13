@@ -65,7 +65,8 @@ public callback URL needed (official WebSocket long connection, auto-reconnect).
 ```bash
 # Git channel (repo root is the plugin)
 dsh plugin --profile web add "github:zyfgood/dsh-feishu-bot#main&path:/"
-# (npm channel: TBD)
+# npm channel (published package)
+dsh plugin --profile web add @zyfgood/dsh-feishu-bot
 ```
 
 Then create a self-built Feishu app (see the Chinese sections below for the
@@ -140,7 +141,8 @@ binding succeeded.
 > export FEISHU_APP_SECRET=xxx
 >
 > dsh plugin --profile web add "github:zyfgood/dsh-feishu-bot#main&path:/"
-> # 或 npm 渠道（发布后可用）：dsh plugin --profile web add dsh-feishu-bot
+> # 或 npm 渠道（npm 上已发布）：
+> # dsh plugin --profile web add @zyfgood/dsh-feishu-bot
 > ```
 >
 > 包内自带 `cordis.patch.yml`（`dsh.bundle.patch`），CLI 安装时自动挂载，
@@ -152,6 +154,20 @@ binding succeeded.
 
 DSH 的 profile 位于 Harness 家目录（`$DSH_HOME`，默认 `~/.dsh`）下的 `profiles/<name>/`。
 以 `web` profile 为例：
+
+**方式 A —— 从 npm 安装（推荐，无需克隆仓库）**
+
+```bash
+cd ~/.dsh/profiles/web
+npm install @zyfgood/dsh-feishu-bot     # 或 pnpm add @zyfgood/dsh-feishu-bot
+```
+
+npm 包内已包含编译好的 `lib/`（无需 `npm run build`）、`cordis.patch.yml`
+（`dsh.bundle.patch`）与 `cordis.patch.example.yml`；运行期依赖
+`@larksuiteoapi/node-sdk` 会随包自动安装，`@deepseek-ai/*` 由 DSH 运行时提供
+（在 package.json 里声明为 peerDependencies）。
+
+**方式 B —— 从本地目录 / Git 仓库安装**
 
 ```bash
 # 1) 把本插件目录复制到 profile 目录（或放到任意位置后用 file: 引用）
