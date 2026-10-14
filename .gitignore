@@ -4,3 +4,5 @@ node_modules/
 
 .devdeps/
 *.tgz
+# local npm auth (never commit)
+.npmrc

@@ -1,4 +1,7 @@
-# dsh-feishu-bot
+# @zyfgood/dsh-feishu-bot
+
+> npm 包名：`@zyfgood/dsh-feishu-bot`（配置里插件行的 `name:` 也必须写这个名字）。
+> 仓库目录名 / 历史文档里的 `dsh-feishu-bot` 指同一个插件。
 
 DeepSeek Harness（DSH）插件：**绑定飞书（Feishu / Lark）机器人并互动**。
 
@@ -26,7 +29,7 @@ DeepSeek Harness（DSH）插件：**绑定飞书（Feishu / Lark）机器人并�
 
 ## English Summary
 
-**dsh-feishu-bot** bridges a [Feishu / Lark](https://open.feishu.cn/) bot into
+**@zyfgood/dsh-feishu-bot** bridges a [Feishu / Lark](https://open.feishu.cn/) bot into
 DeepSeek Harness (DSH). Talk to your DSH agent from Feishu on your phone — no
 public callback URL needed (official WebSocket long connection, auto-reconnect).
 
@@ -149,6 +152,10 @@ binding succeeded.
 > 无需手工编辑配置文件；默认 `llm` 模式，改 `agent` 模式等见「三、配置项」，
 > 在 profile 自己的 `cordis.patch.yml` 里按 `id: feishu-bot` 覆盖即可。
 > 装完重启 `dsh web` 生效；下方是手工安装方式（适用于任何托管位置）。
+>
+> **DeepSeek Harness Desktop 用户**：把上面的 `--profile web` 换成 `--profile desktop`
+> 即可（桌面版的 profile 名为 `desktop`），例如
+> `dsh plugin --profile desktop add @zyfgood/dsh-feishu-bot`。
 
 ### 2.1 把插件放进 profile 目录并安装依赖
 
@@ -190,7 +197,7 @@ pnpm add ./dsh-feishu-bot
 
 ```yaml
 - id: feishu-bot
-  name: dsh-feishu-bot
+  name: '@zyfgood/dsh-feishu-bot'
   config:
     appId: 'env:FEISHU_APP_ID'
     appSecret: 'env:FEISHU_APP_SECRET'
@@ -291,7 +298,7 @@ dsh --profile web
 
   ```yaml
   - id: feishu-bot
-    name: dsh-feishu-bot
+    name: '@zyfgood/dsh-feishu-bot'
     config:
       appId: 'env:FEISHU_APP_ID'
       appSecret: 'env:FEISHU_APP_SECRET'
@@ -491,10 +498,18 @@ SDK 按前缀自动推断接收方类型。按钮卡片（`feishu_ask_choice` / 
 ## 开发与构建
 
 ```bash
-npm install --legacy-peer-deps   # 安装依赖（@deepseek-ai/* 由 DSH 运行期提供，这里仅用于类型检查）
+npm install          # 安装依赖；@deepseek-ai/* 已钉在 0.2.0-rc.2 作为类型检查用 devDependencies
 npm run build                    # tsc 构建到 lib/
 npm test                         # 冒烟测试（mock 上下文跑通核心链路，无需真实飞书凭证）
 ```
+
+> 运行期的 `@deepseek-ai/*` 由 DSH 提供（声明为 `peerDependencies`），devDependencies
+> 里钉的同一批包只用于离线类型检查。
+>
+> **DSH 版本兼容**：本包在 **DSH 0.2.0-rc.2**（DeepSeek Harness Desktop 0.2.0-rc.2）上
+> 验证通过，`engines.dsh` 与 `@deepseek-ai/dsh-*` peer 范围均声明为
+> `>=0.2.0-rc.2 <0.3.0-0`。DSH 安装期会用它做兼容性预检（不满足直接拒绝安装），
+> 换到其它 DSH 版本时请按实际验证结果调整该范围。
 
 > 仓库中的 `lib/` 为已构建产物（开箱即用）；修改 `src/` 后运行 `npm run build` 重新生成。
 

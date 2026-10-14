@@ -1,4 +1,4 @@
-# dsh-feishu-bot 加载示例 —— 追加到 profile 的 cordis.patch.yml
+# @zyfgood/dsh-feishu-bot 加载示例 —— 追加到 profile 的 cordis.patch.yml
 #
 # 飞书开放平台侧（开发者后台，自建应用）：
 #   1. 凭证与基础信息 → 复制 App ID / App Secret
@@ -13,7 +13,7 @@
 
 # ── 方式一：llm 自动回复（默认，自包含） ──────────────────────────────
 - id: feishu-bot
-  name: dsh-feishu-bot
+  name: '@zyfgood/dsh-feishu-bot'
   config:
     appId: 'env:FEISHU_APP_ID'
     appSecret: 'env:FEISHU_APP_SECRET'
@@ -28,7 +28,7 @@
 
 # ── 方式二：agent 模式（把消息转交给 DSH agent 会话处理） ─────────────
 # - id: feishu-bot
-#   name: dsh-feishu-bot
+#   name: '@zyfgood/dsh-feishu-bot'
 #   config:
 #     appId: 'env:FEISHU_APP_ID'
 #     appSecret: 'env:FEISHU_APP_SECRET'
@@ -38,7 +38,7 @@
 
 # ── 方式三：echo 模式（先验证绑定是否打通） ────────────────────────────
 # - id: feishu-bot
-#   name: dsh-feishu-bot
+#   name: '@zyfgood/dsh-feishu-bot'
 #   config:
 #     appId: 'env:FEISHU_APP_ID'
 #     appSecret: 'env:FEISHU_APP_SECRET'
