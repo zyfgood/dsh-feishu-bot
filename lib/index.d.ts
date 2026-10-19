@@ -61,6 +61,14 @@ export interface Config {
     provider?: string;
     /** llm 模式的模型 id。 */
     model?: string;
+    /**
+     * 默认思考模式档位（v0.9.0，adapter 声明的 reasoning effort id，
+     * 如 `off` / `low` / `high` / `max`）：`llm` 模式直接随请求发送；
+     * `agent` 模式下作为新会话的默认档位（本飞书会话可用 `/thinking`
+     * 命令覆盖）。不配置时跟随模型默认档位；模型不支持时 DSH 会拒绝
+     * 请求（`UNSUPPORTED_REASONING_EFFORT`），此时请留空。
+     */
+    reasoningEffort?: string;
     /** llm 模式每会话保留的历史对话轮数（0 = 无记忆）。 */
     maxHistory?: number;
     /** agent 模式：转交的目标 agent（ctx.agents 中的会话 id）；不配置则自动创建。 */

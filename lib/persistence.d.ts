@@ -22,12 +22,18 @@ export declare class ChatSessionStore {
     delete(chatId: string): void;
     private save;
 }
-/** /model 命令设置的模型选择（chat_id 维度，跨重启保留）。 */
+/**
+ * `/model` / `/thinking` 命令设置的模型选择（chat_id 维度，跨重启保留）。
+ * `reasoningEffort`（v0.9.0）由 /thinking 写入：缺省表示跟随模型默认
+ * 思考档位（旧文件无该字段，加载后语义不变）。
+ */
 export interface StoredModelSelection {
     provider: string;
     model: string;
+    /** 思考模式档位（adapter 声明的 reasoning effort id，如 off/low/high/max）。 */
+    reasoningEffort?: string;
 }
-/** chat_id → 模型选择 的持久化映射（/model 命令写入，原子替换落盘）。 */
+/** chat_id → 模型选择 的持久化映射（/model、/thinking 命令写入，原子替换落盘）。 */
 export declare class ModelOverrideStore {
     private readonly path;
     private data;

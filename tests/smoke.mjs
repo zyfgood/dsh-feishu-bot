@@ -79,6 +79,50 @@ function makeFakeLlm(replyText = '你好，我是 LLM 自动回复！') {
   }
 }
 
+/**
+ * 带思考档位能力的 mock llm（/thinking、/model 协同用例）：
+ * - deepseek-official 的模型支持 off/low/high/max（默认 high）；
+ * - plain provider 的模型无 reasoning 能力（resolveModelInfo 无 reasoning，
+ *   resolveCallConfig 带档位时按 UNSUPPORTED_REASONING_EFFORT 语义抛错）；
+ * - streamArgs 记录每次 stream 请求参数（供 llm 模式档位透传断言）。
+ */
+const THINK_EFFORTS = [
+  { id: 'off', name: 'Off' },
+  { id: 'low', name: 'Low' },
+  { id: 'high', name: 'High' },
+  { id: 'max', name: 'Max' },
+]
+
+function makeReasoningLlm() {
+  const reasoningProviders = new Set(['deepseek-official'])
+  const llm = {
+    streamArgs: [],
+    stream: async function* (opts) {
+      llm.streamArgs.push(opts)
+      yield { type: 'text-delta', index: 0, text: 'ok' }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    },
+    listProviders: () => [{ id: 'deepseek-official' }, { id: 'plain' }],
+    listModels: async (provider) =>
+      provider === 'plain' ? [{ id: 'plain-model' }] : [{ id: 'deepseek-v4-flash' }, { id: 'deepseek-v4-pro' }],
+    resolveModelInfo: async (provider) => (reasoningProviders.has(provider)
+      ? { reasoning: { efforts: THINK_EFFORTS, defaultEffort: 'high' } }
+      : {}),
+    resolveCallConfig: async (config) => {
+      if (config.reasoningEffort !== undefined) {
+        if (!reasoningProviders.has(config.provider)) {
+          throw new Error(`provider "${config.provider}" model "${config.model}" does not support reasoning effort "${config.reasoningEffort}"`)
+        }
+        if (!THINK_EFFORTS.some(e => e.id === config.reasoningEffort)) {
+          throw new Error(`provider "${config.provider}" model "${config.model}" does not support reasoning effort "${config.reasoningEffort}"`)
+        }
+      }
+      return { provider: config.provider, model: config.model, ...(config.reasoningEffort === undefined ? {} : { reasoningEffort: config.reasoningEffort }) }
+    },
+  }
+  return llm
+}
+
 /** 装载插件 + 桩住发送，返回 { ctx, send, handler }。 */
 async function boot(configRaw, fakeServices = {}) {
   const cfg = Config['~standard'].validate(configRaw)
@@ -1460,6 +1504,194 @@ console.log('34) 问题卡片超时结果回写')
   assert.ok(editedText.includes('超时'), `超时视图应标注超时（实际：${editedText}）`)
   assert.ok(!JSON.stringify(editCard.input.card).includes('"button"'), '超时视图不应再有按钮')
   ok('超时兜底：卡片定格为超时结果视图，按钮不再可点')
+}
+
+// ── 35. /thinking：列出/切换/重置思考档位（v0.9.0） ────────────
+console.log('35) /thinking 查看切换思考模式')
+{
+  const os = await import('node:os')
+  const path = await import('node:path')
+  const fs = await import('node:fs')
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'feishu-think-'))
+  const oldHome = process.env.DSH_HOME
+  process.env.DSH_HOME = tmp
+  try {
+    const agents = makeAgentsRegistry()
+    const { send, handler } = await boot(
+      {
+        appId: 'cli_x', appSecret: 's', mode: 'agent',
+        provider: 'deepseek-official', model: 'deepseek-v4-flash',
+        workspace: '/mnt/d/DSHProjects', tools: false,
+      },
+      { agents, llm: makeReasoningLlm(), agentPresets: { defaultId: 'standard' } },
+    )
+    const overridesPath = path.join(tmp, 'feishu-bot', 'model-overrides.json')
+
+    // 35a: list 列出档位并标注默认
+    await handler({ chatId: 'oc_35', messageId: 'om_35a', content: '/thinking list', senderId: 'ou_1' })
+    await new Promise(r => setTimeout(r, 30))
+    const listText = reply(send)
+    assert.ok(listText.includes('off') && listText.includes('low') && listText.includes('high') && listText.includes('max'), '应列出全部档位')
+    assert.ok(listText.includes('默认'), '应标注模型默认档位')
+
+    // 35b: /thinking max 切换并持久化
+    await handler({ chatId: 'oc_35', messageId: 'om_35b', content: '/thinking max', senderId: 'ou_1' })
+    await new Promise(r => setTimeout(r, 30))
+    assert.ok(reply(send).includes('思考模式已切换为 max'), '切换应确认')
+    const stored = JSON.parse(fs.readFileSync(overridesPath, 'utf8'))
+    assert.equal(stored['oc_35']?.reasoningEffort, 'max', '覆盖应持久化 reasoningEffort=max')
+    assert.equal(stored['oc_35']?.provider, 'deepseek-official', '模型维度保持当前解析值')
+
+    // 35c: 状态视图标注 /thinking 来源
+    await handler({ chatId: 'oc_35', messageId: 'om_35c', content: '/thinking', senderId: 'ou_1' })
+    await new Promise(r => setTimeout(r, 30))
+    assert.ok(reply(send).includes('max（/thinking 设置）'), '状态应标注来源')
+
+    // 35d: 编号切换（list 编号 1 = off）
+    await handler({ chatId: 'oc_35', messageId: 'om_35d', content: '/thinking 1', senderId: 'ou_1' })
+    await new Promise(r => setTimeout(r, 30))
+    assert.ok(reply(send).includes('思考模式已切换为 off'), '编号切换应生效')
+    assert.equal(JSON.parse(fs.readFileSync(overridesPath, 'utf8'))['oc_35']?.reasoningEffort, 'off')
+
+    // 35e: 未知档位报错
+    await handler({ chatId: 'oc_35', messageId: 'om_35e', content: '/thinking turbo', senderId: 'ou_1' })
+    await new Promise(r => setTimeout(r, 30))
+    assert.ok(reply(send).includes('不支持思考档位'), '未知档位应报错')
+
+    // 35f: reset 恢复默认（模型维度与无覆盖解析一致 → 整条删除）
+    await handler({ chatId: 'oc_35', messageId: 'om_35f', content: '/thinking reset', senderId: 'ou_1' })
+    await new Promise(r => setTimeout(r, 30))
+    assert.ok(reply(send).includes('已恢复默认思考档位'), 'reset 应确认')
+    assert.equal(JSON.parse(fs.readFileSync(overridesPath, 'utf8'))['oc_35'], undefined, '无 /model 覆盖时 reset 应删除整条记录')
+    ok('/thinking list / <档位> / <编号> / reset 全链路 + 持久化')
+  } finally {
+    if (oldHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = oldHome
+    fs.rmSync(tmp, { recursive: true, force: true })
+  }
+}
+
+// ── 36. 配置 reasoningEffort 透传到 agentOptions 与状态视图 ─────
+console.log('36) 插件配置 reasoningEffort 透传')
+{
+  const agents = makeAgentsRegistry()
+  let capturedOptions = null
+  const realCreate = agents.create
+  agents.create = async (opts) => {
+    capturedOptions = opts.agentOptions
+    return realCreate(opts)
+  }
+  const { send, handler } = await boot(
+    {
+      appId: 'cli_x', appSecret: 's', mode: 'agent',
+      provider: 'deepseek-official', model: 'deepseek-v4-flash', reasoningEffort: 'low',
+      workspace: '/mnt/d/DSHProjects', tools: false, persistSessions: false,
+    },
+    { agents, llm: makeReasoningLlm(), agentPresets: { defaultId: 'standard' } },
+  )
+  await handler({ chatId: 'oc_36', messageId: 'om_36a', content: '你好', senderId: 'ou_1' })
+  await new Promise(r => setTimeout(r, 30))
+  assert.deepEqual(capturedOptions, { provider: 'deepseek-official', model: 'deepseek-v4-flash', reasoningEffort: 'low' }, 'agentOptions 应带思考档位')
+  await handler({ chatId: 'oc_36', messageId: 'om_36b', content: '/thinking', senderId: 'ou_1' })
+  await new Promise(r => setTimeout(r, 30))
+  assert.ok(reply(send).includes('low（插件配置）'), '状态视图应标注插件配置来源')
+  ok('配置 reasoningEffort → agentOptions + 状态视图')
+}
+
+// ── 37. /model 切换模型与思考档位的协同 ─────────────────────────
+console.log('37) /model 切模型的档位兼容协同')
+{
+  const os = await import('node:os')
+  const path = await import('node:path')
+  const fs = await import('node:fs')
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'feishu-think2-'))
+  const oldHome = process.env.DSH_HOME
+  process.env.DSH_HOME = tmp
+  try {
+    const agents = makeAgentsRegistry()
+    const { send, handler } = await boot(
+      {
+        appId: 'cli_x', appSecret: 's', mode: 'agent',
+        provider: 'deepseek-official', model: 'deepseek-v4-flash',
+        workspace: '/mnt/d/DSHProjects', tools: false,
+      },
+      { agents, llm: makeReasoningLlm(), agentPresets: { defaultId: 'standard' } },
+    )
+    const overridesPath = path.join(tmp, 'feishu-bot', 'model-overrides.json')
+
+    // 37a: 已设档位覆盖 → 切到不支持的模型 → 自动清除并提示
+    await handler({ chatId: 'oc_37', messageId: 'om_37a', content: '/thinking max', senderId: 'ou_1' })
+    await new Promise(r => setTimeout(r, 30))
+    await handler({ chatId: 'oc_37', messageId: 'om_37b', content: '/model plain/plain-model', senderId: 'ou_1' })
+    await new Promise(r => setTimeout(r, 30))
+    const switchReply = reply(send)
+    assert.ok(switchReply.includes('plain / plain-model'), '切模型应成功')
+    assert.ok(switchReply.includes('已自动清除'), '不支持的档位应提示清除')
+    let stored = JSON.parse(fs.readFileSync(overridesPath, 'utf8'))
+    assert.equal(stored['oc_37']?.reasoningEffort, undefined, '档位字段应被清除')
+    assert.equal(stored['oc_37']?.model, 'plain-model', '模型维度应保留')
+
+    // 37b: 切回支持的模型再设档位 → 再切另一个支持的模型 → 档位保留
+    await handler({ chatId: 'oc_37', messageId: 'om_37c', content: '/model deepseek-official/deepseek-v4-flash', senderId: 'ou_1' })
+    await new Promise(r => setTimeout(r, 30))
+    await handler({ chatId: 'oc_37', messageId: 'om_37d', content: '/thinking high', senderId: 'ou_1' })
+    await new Promise(r => setTimeout(r, 30))
+    await handler({ chatId: 'oc_37', messageId: 'om_37e', content: '/model deepseek-official/deepseek-v4-pro', senderId: 'ou_1' })
+    await new Promise(r => setTimeout(r, 30))
+    assert.ok(!reply(send).includes('已自动清除'), '支持的模型不应清除档位')
+    stored = JSON.parse(fs.readFileSync(overridesPath, 'utf8'))
+    assert.equal(stored['oc_37']?.reasoningEffort, 'high', '兼容模型的档位应保留')
+    assert.equal(stored['oc_37']?.model, 'deepseek-v4-pro')
+    ok('/model 切模型：不兼容档位自动清除、兼容档位保留')
+  } finally {
+    if (oldHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = oldHome
+    fs.rmSync(tmp, { recursive: true, force: true })
+  }
+}
+
+// ── 38. llm 模式：reasoningEffort 随请求发送 ────────────────────
+console.log('38) llm 模式思考档位透传')
+{
+  const llm = makeReasoningLlm()
+  const { send, handler } = await boot(
+    {
+      appId: 'cli_x', appSecret: 's', mode: 'llm',
+      provider: 'deepseek-official', model: 'deepseek-v4-flash', reasoningEffort: 'low',
+      tools: false,
+    },
+    { llm },
+  )
+  await handler({ chatId: 'oc_38', messageId: 'om_38', content: '你好', senderId: 'ou_1' })
+  await new Promise(r => setTimeout(r, 30))
+  assert.equal(llm.streamArgs[0]?.reasoningEffort, 'low', 'stream 请求应带 reasoningEffort')
+  ok('llm 模式请求携带思考档位')
+}
+
+// ── 39. /model 状态视图与 /new 预览显示思考模式 ─────────────────
+console.log('39) 状态视图与 /new 预览显示思考模式')
+{
+  const agents = makeAgentsRegistry()
+  const { send, handler } = await boot(
+    {
+      appId: 'cli_x', appSecret: 's', mode: 'agent',
+      provider: 'deepseek-official', model: 'deepseek-v4-flash',
+      workspace: '/mnt/d/DSHProjects', tools: false, persistSessions: false,
+    },
+    { agents, llm: makeReasoningLlm(), agentPresets: { defaultId: 'standard' } },
+  )
+  await handler({ chatId: 'oc_39', messageId: 'om_39a', content: '/model', senderId: 'ou_1' })
+  await new Promise(r => setTimeout(r, 30))
+  const modelStatus = reply(send)
+  assert.ok(modelStatus.includes('思考模式'), '/model 状态应显示思考模式行')
+  assert.ok(modelStatus.includes('high（模型默认'), '应展示模型默认档位')
+  assert.ok(modelStatus.includes('/thinking'), '应提示 /thinking 用法')
+  await handler({ chatId: 'oc_39', messageId: 'om_39b', content: '/new', senderId: 'ou_1' })
+  await new Promise(r => setTimeout(r, 30))
+  const preview = reply(send)
+  assert.ok(preview.includes('思考模式：'), '/new 预览应含思考模式行')
+  assert.ok(preview.includes('high'), '预览应展示生效档位')
+  ok('/model 状态与 /new 预览展示思考模式')
 }
 
 console.log(`

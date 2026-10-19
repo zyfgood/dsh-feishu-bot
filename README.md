@@ -43,11 +43,15 @@ public callback URL needed (official WebSocket long connection, auto-reconnect).
   `steer` at the next step boundary — the agent answers first (streamed), then
   continues the task.
 - **Session commands**: `/new` (fresh context, reply previews the next
-  session's model/permission/preset/workspace), `/model` (view or switch this
+  session's model/effort/permission/preset/workspace), `/model` (view or switch this
   chat's model — `/model list` numbers each model so you can switch with
   `/model <n>` just like `/attach <n>`; effective from the next step on the
-  live session, persisted per chat), `/sessions` (list sessions), `/attach`
-  (take over an existing GUI session — both sides share context), `/detach`.
+  live session, persisted per chat), `/thinking` (view or switch this chat's
+  reasoning effort — `/thinking list` numbers the model's supported levels,
+  `/thinking <level|n>` switches, `/thinking reset` follows the default;
+  effective from the next step, persisted per chat), `/sessions` (list
+  sessions), `/attach` (take over an existing GUI session — both sides share
+  context), `/detach`.
 - **Outbound (agent → Feishu)**: nine model-callable tools
   (`feishu_send_message`, `feishu_send_card`, `feishu_ask_choice`,
   `feishu_reply_message`, `feishu_list_chats`, `feishu_get_messages`,
@@ -239,6 +243,7 @@ dsh --profile web
 | `systemPrompt` | string | 默认提示词 | `llm` 模式的系统提示词 |
 | `provider` | string | — | provider 路由（如 `deepseek-official`）。`llm` 模式直接使用；`agent` 模式自动创建会话时优先使用 |
 | `model` | string | — | 模型 id（如 `deepseek-v4-flash`）。`llm` 模式直接使用；`agent` 模式自动创建会话时优先使用 |
+| `reasoningEffort` | string | — | 默认思考模式档位（v0.9.0，adapter 声明的 reasoning effort id，如 `off`/`low`/`high`/`max`，DeepSeek 官方默认 `high`）。`llm` 模式随请求发送；`agent` 模式作为新会话默认档位，飞书里可用 `/thinking` 按会话覆盖。不配置时跟随模型默认档位；模型不支持时 DSH 会拒绝请求（`UNSUPPORTED_REASONING_EFFORT`），此时请留空 |
 | `maxHistory` | number | `20` | `llm` 模式每会话保留的对话轮数（0 = 无记忆） |
 | `agentId` | string | — | `agent` 模式：目标 DSH agent 会话 id（不配置则自动创建） |
 | `agentPreset` | string | 跟随默认 | 自动创建会话使用的 agent preset（如 `standard` / `liangshen`）；不配置跟随 GUI 默认预设 |
@@ -254,7 +259,7 @@ dsh --profile web
 | `tools` | boolean | `true` | 是否注册 `feishu_*` 模型工具 |
 | `pushChatId` | string | — | 飞书目标群 chat_id（`oc_` 开头）；配置后启用 `feishu_push` 工具（任务结果/定时推送直达该群） |
 
-### 3.1 新会话的模型与权限如何确定（agent 模式）
+### 3.1 新会话的模型、思考模式与权限如何确定（agent 模式）
 
 `/new` 后下一条消息自动新建会话时，模型按以下顺序解析（`resolveAgentModel`）：
 
@@ -264,6 +269,17 @@ dsh --profile web
 3. 缺失时回退 **GUI 默认模型** `ctx.agentDefaultModel`（settings.yaml 的
    `agent-default-model` 分节，即 GUI 选择的默认模型，热更新生效）。
 
+**思考模式**（reasoning effort，v0.9.0）在同一覆盖链上解析，模型档位由
+provider adapter 声明（DeepSeek 官方：`off`/`low`/`high`/`max`，默认
+`high`；部分模型不支持档位）：
+
+1. **`/thinking` 命令设置的覆盖**（与 `/model` 覆盖共用同一条持久化记录，
+   只写 `reasoningEffort` 字段，最高优先级）；
+2. **插件配置** `reasoningEffort`（模型未走命令覆盖时生效）；
+3. 模型回退 GUI 默认模型时，沿用 **GUI 默认模型自带的档位**；
+4. 都没有 → **跟随模型默认档位**（不向请求传 effort，由 DSH 物化模型
+   自身的 `defaultEffort`）。
+
 `/model <provider>/<模型id>` 切换的是第 1 层覆盖：经 `ctx.llm` 校验模型可用
 后写入，对**活跃会话从下一个 step 生效**（与 GUI 切模型同一机制：
 `installModelSelection` 每 step 实时读取，运行中任务当前 step 不受影响），
@@ -271,6 +287,13 @@ dsh --profile web
 `/model list` 为每个模型标注连续编号并按会话记忆，之后 `/model <编号>`
 即可切换（与 `/attach <编号>` 同一交互模式，编号以最近一次列表为准）。
 `/attach` 接手或 `agentId` 配置的 GUI 会话不适用（模型在 GUI 会话内切换）。
+
+`/thinking <档位|编号>` 同样经 `ctx.llm` 校验后写入覆盖（档位列表用
+`/thinking list` 查看，带编号与默认/当前标注）；切换同样从下一个 step
+生效（effort-only 变化不会插入 model changed 通知）。**切模型时的协同**：
+已有档位覆盖而新模型不支持该档位时，`/model` 会自动清除档位并在回复中
+提示（避免下一条请求被 `UNSUPPORTED_REASONING_EFFORT` 拒绝）；新模型
+支持时档位原样保留。
 
 权限与预设跟随 DSH 全局设置，插件不单独覆盖：权限预设取
 `ctx.permissionPresets` 默认值（settings.yaml `permission.defaultPreset`，
@@ -350,8 +373,9 @@ agent 在飞书会话里调用 `ask_user_question`（需要你确认/选择）�
 
 | 命令 | 作用 |
 |---|---|
-| `/new` 或 `/reset` | **开始新会话**：完全重置本飞书会话——销毁专属 agent（即便当前正 `/attach` 接手它）、清除接手绑定与持久映射，下一条消息自动新建（上下文清空）；v0.6.9 起回复附带**新会话参数预览**（模型及来源、权限预设 sandbox/approval、agent 预设、工作目录） |
-| `/model` | **查看/切换本飞书会话的模型**（v0.7.0）：`/model` 看状态 · `/model list` 列可用模型（带编号） · `/model <编号>` 数字切换（参照 `/attach`，如 `/model 3`） · `/model <provider>/<模型id>` 精确切换 · `/model <模型id>` 唯一匹配（歧义时列候选） · `/model reset` 恢复默认。切换对活跃会话自下一个 step 生效（运行中任务不撕裂），并持久化跨重启（`model-overrides.json`）；仅影响本飞书会话 |
+| `/new` 或 `/reset` | **开始新会话**：完全重置本飞书会话——销毁专属 agent（即便当前正 `/attach` 接手它）、清除接手绑定与持久映射，下一条消息自动新建（上下文清空）；v0.6.9 起回复附带**新会话参数预览**（模型及来源、思考模式及来源、权限预设 sandbox/approval、agent 预设、工作目录） |
+| `/model` | **查看/切换本飞书会话的模型**（v0.7.0）：`/model` 看状态（含思考模式行）· `/model list` 列可用模型（带编号） · `/model <编号>` 数字切换（参照 `/attach`，如 `/model 3`） · `/model <provider>/<模型id>` 精确切换 · `/model <模型id>` 唯一匹配（歧义时列候选） · `/model reset` 恢复默认。切换对活跃会话自下一个 step 生效（运行中任务不撕裂），并持久化跨重启（`model-overrides.json`）；仅影响本飞书会话 |
+| `/thinking` | **查看/切换本飞书会话的思考模式**（v0.9.0）：`/thinking` 看状态（模型/生效档位/来源） · `/thinking list` 列当前模型支持的档位（带编号，标注默认/当前） · `/thinking <档位>` 如 `/thinking max` 切换 · `/thinking <编号>` 数字切换 · `/thinking reset` 恢复默认。切换对活跃会话自下一个 step 生效并持久化；与 `/model` 切模型自动协同（不支持的档位自动清除并提示） |
 | `/sessions` | 列出当前活跃的 DSH agent 会话（编号 + 标题 + 模型 + 工作目录） |
 | `/attach <编号或会话id>` | **接手 GUI 中某个既有会话**：此后该飞书会话直接驱动它（两边共享上下文，GUI 可见） |
 | `/detach` | 解除接手（回复会如实说明下一条消息的去向，优先级与路由一致：配置 agentId → 本会话专属会话（若有）→ 持久映射 → 自动新建，并附 `/new` 指引） |
@@ -494,6 +518,13 @@ SDK 按前缀自动推断接收方类型。按钮卡片（`feishu_ask_choice` / 
   v0.8.3 起 `/new` 在任何分支都做**完全重置**（销毁专属 agent + 清空
   stateByChat/chatByAgent/持久映射），承诺永远为真；`/detach` 的去向说明
   也补上了「本会话专属会话」这一档（优先级与路由一致）。
+- **思考模式切换无效 / 报 `UNSUPPORTED_REASONING_EFFORT`**：思考档位
+  因模型而异（由 provider adapter 声明，DeepSeek 官方为
+  `off`/`low`/`high`/`max`，部分模型无档位），先 `/thinking list` 查看
+  当前模型支持的档位再切换；`llm` 模式没有命令入口，请改插件配置
+  `reasoningEffort`；`/attach` 接手或 `agentId` 配置的 GUI 会话请在 GUI
+  会话内切换。切换对活跃会话自下一个 step 生效——运行中的当前 step 仍用
+  旧档位，属预期行为（与 GUI 切换同机制，不打断任务）。
 
 ## 开发与构建
 

@@ -15,6 +15,10 @@
  *                        v0.6.9 起回复附新会话参数预览：模型/权限/预设/目录）
  *   `/model`            查看/切换本飞书会话的模型（v0.7.0；覆盖 > 插件配置
  *                        > GUI 默认；活跃会话自下一 step 生效；/model reset 恢复）
+ *   `/thinking`         查看/切换本飞书会话的思考模式（v0.9.0；档位来自
+ *                        模型能力，/thinking list 列出；覆盖 > 插件配置
+ *                        reasoningEffort > GUI 默认模型的档位 > 模型默认；
+ *                        活跃会话自下一 step 生效；/thinking reset 恢复）
  *   `/sessions`          列出当前活跃的 DSH agent 会话
  *   `/attach <会话id>`   接手 GUI 中某个既有会话（此后该飞书会话驱动它）
  *   `/detach`            解除接手，回到自动创建模式
@@ -106,6 +110,11 @@ interface ChatBinding {
         provider: string;
         model: string;
     }>;
+    /** 最近一次 `/thinking list` 的编号 → 思考档位 id 映射（支持 /thinking 数字选择）。 */
+    lastThinkingList?: Array<{
+        index: number;
+        effort: string;
+    }>;
 }
 /** agent 模式共享状态：会话绑定、流式转发、确认问答、持久化。 */
 export interface InboundShared {
@@ -123,19 +132,27 @@ export interface InboundShared {
 /** 从自动创建的 agent id（feishu-<chatId>-<rand8>）反推 chat_id。 */
 export declare function chatIdFromAgentId(id: string): string | undefined;
 /**
- * 解析自动创建 agent 时将使用的 provider/model（单一事实来源，/new 提示、
- * /model 状态与实际创建走同一逻辑）：
- * 1. `/model` 命令为本飞书会话设置的覆盖（modelStore，最高优先级）；
- * 2. 插件配置的 `provider`/`model`（cordis.patch.yml）；
- * 3. 缺失项回退 `ctx.agentDefaultModel.currentSelection()`（GUI 默认模型，
- *    settings.yaml 的 agent-default-model 分节，热更新生效）。
+ * 解析自动创建 agent 时将使用的 provider/model/思考档位（单一事实来源，
+ * /new 提示、/model、/thinking 状态与实际创建走同一逻辑）：
+ * 1. `/model` / `/thinking` 命令为本飞书会话设置的覆盖（modelStore，
+ *    最高优先级；provider/model 来自 /model，reasoningEffort 来自
+ *    /thinking，共用同一条持久化记录）；
+ * 2. 插件配置的 `provider`/`model`/`reasoningEffort`（cordis.patch.yml）；
+ * 3. 缺失项回退 `ctx.agentDefaultModel.currentSelection()`（GUI 默认模型
+ *    及其思考档位，settings.yaml 的 agent-default-model 分节，热更新生效）。
  *
- * @returns 解析结果；source 标记模型来自 /model 覆盖、插件配置还是 GUI
+ * `reasoningEffort` 缺省（undefined）表示「跟随模型默认档位」——创建
+ * agent 与 installModelSelection 都按「不指定 effort」传递，由 DSH 物化
+ * 模型自身的 defaultEffort；只有明确覆盖（命令/配置/GUI 默认带档位）
+ * 才作为会话选择传递。
+ *
+ * @returns 解析结果；source 标记模型来自命令覆盖、插件配置还是 GUI
  *          默认（混合取值时归为 default），全部缺失时返回 undefined。
  */
 export declare function resolveAgentModel(ctx: Context, config: Config, chatId?: string, shared?: InboundShared): {
     provider: string;
     model: string;
+    reasoningEffort?: string;
     source: 'override' | 'config' | 'default';
 } | undefined;
 /**
